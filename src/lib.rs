@@ -840,6 +840,24 @@ fn compare_page_nav(
     right: &ScanSummaryPage,
     findings: &mut Vec<CompareFinding>,
 ) {
+    let left_nav_labels = left
+        .nav_candidates
+        .iter()
+        .fold(BTreeMap::<BTreeSet<String>, BTreeSet<String>>::new(), |mut acc, candidate| {
+            let targets = candidate.targets.iter().cloned().collect::<BTreeSet<_>>();
+            let label = candidate.label.clone().unwrap_or_default();
+            acc.entry(targets).or_default().insert(label);
+            acc
+        });
+    let right_nav_labels = right
+        .nav_candidates
+        .iter()
+        .fold(BTreeMap::<BTreeSet<String>, BTreeSet<String>>::new(), |mut acc, candidate| {
+            let targets = candidate.targets.iter().cloned().collect::<BTreeSet<_>>();
+            let label = candidate.label.clone().unwrap_or_default();
+            acc.entry(targets).or_default().insert(label);
+            acc
+        });
     let left_nav = left
         .nav_candidates
         .iter()
@@ -867,6 +885,19 @@ fn compare_page_nav(
                 targets
             ),
         });
+    }
+    for targets in left_nav.intersection(&right_nav) {
+        let left_labels = left_nav_labels.get(targets).cloned().unwrap_or_default();
+        let right_labels = right_nav_labels.get(targets).cloned().unwrap_or_default();
+        if left_labels != right_labels {
+            findings.push(CompareFinding {
+                kind: "nav-label-mismatch".to_string(),
+                message: format!(
+                    "state `{key}` の nav target set {:?} で label が不一致: left={:?} right={:?}",
+                    targets, left_labels, right_labels
+                ),
+            });
+        }
     }
 }
 
@@ -4740,6 +4771,67 @@ node:
         assert!(!rendered.contains("right に control `button:右だけ` が無い"));
         assert!(rendered.contains("[unexpected-control]"));
         assert!(rendered.contains("right にのみ control `button:右だけ` がある"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compare_scan_inputs_reports_nav_label_mismatch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-compare-nav-label-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left_html = dir.join("left.html");
+        let right_html = dir.join("right.html");
+        let left_manifest = dir.join("left.snapshot.yaml");
+        let right_manifest = dir.join("right.snapshot.yaml");
+        fs::write(
+            &left_html,
+            r#"<!doctype html><html><head><title>PIR</title></head><body>
+            <nav aria-label='main nav'>
+              <a href='/reports'>レポート</a>
+              <a href='/incidents'>インシデント</a>
+            </nav>
+            </body></html>"#,
+        )
+        .expect("write left html");
+        fs::write(
+            &right_html,
+            r#"<!doctype html><html><head><title>PIR</title></head><body>
+            <nav aria-label='primary navigation'>
+              <a href='/reports'>レポート</a>
+              <a href='/incidents'>インシデント</a>
+            </nav>
+            </body></html>"#,
+        )
+        .expect("write right html");
+        fs::write(
+            &left_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: left.html
+"#,
+        )
+        .expect("write left manifest");
+        fs::write(
+            &right_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: right.html
+"#,
+        )
+        .expect("write right manifest");
+
+        let rendered = render_compare_report(
+            &compare_scan_inputs(&left_manifest, &right_manifest).expect("compare"),
+        );
+        assert!(rendered.contains("[nav-label-mismatch]"));
+        assert!(rendered.contains("left={\"main nav\"}"));
+        assert!(rendered.contains("right={\"primary navigation\"}"));
 
         fs::remove_dir_all(&dir).ok();
     }
