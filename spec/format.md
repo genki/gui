@@ -9,8 +9,9 @@ Each GUI model is defined by four main parts:
 - `nav`: named ordered target page lists
 - `pages`: page objects keyed by page id
 
-By default, a leaf in the `inherit` forest is page-like. A non-leaf node in the
-`inherit` forest may instead represent a layout, shell, or template.
+Every page must appear exactly once as a leaf in the `inherit` forest.
+Non-leaf nodes in the `inherit` forest may instead represent layouts, shells,
+or templates.
 
 The model intentionally does not require a top-level `transitions` section.
 Many practical transitions are derived from:
@@ -43,9 +44,9 @@ pages:
 ## Rules
 
 - `pages` is a map keyed by unique page id.
-- an `inherit` leaf is page-like by default.
+- every page must appear exactly once as an `inherit` leaf.
 - a non-leaf `inherit` node is not necessarily a page.
-- a page may appear in at most one place in the `inherit` forest.
+- a non-leaf `inherit` node may represent a layout, shell, or template.
 - a page may appear in at most one place in the `drill` forest.
 - each `nav` entry is an ordered page id list.
 - `page.nav` is a set or ordered list of nav ids.

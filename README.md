@@ -9,7 +9,8 @@ The format treats `nav` as a first-class shared component.
 
 - a `nav` is a named ordered target page list
 - a `page` directly declares the navs it exposes
-- an `inherit` leaf is page-like by default; non-leaf nodes may be layouts or shells
+- every page must appear exactly once as a leaf in `inherit`
+- non-leaf `inherit` nodes may be layouts or shells
 - many apparent transitions are derived from `drill` and `nav`
 
 ## Example
@@ -29,6 +30,7 @@ nav:
 
 inherit:
   RootLayout:
+    - Home
     - Products
     - AdminShell:
         - AdminRoot
