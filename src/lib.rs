@@ -724,6 +724,9 @@ fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
         for breadcrumb in &mut page.breadcrumb_paths {
             *breadcrumb = normalize_logical_page_path(breadcrumb);
         }
+        if let Some(snapshot_url) = &mut page.snapshot_url {
+            *snapshot_url = normalize_logical_page_path(snapshot_url);
+        }
         if let Some(existing) = merged_by_path.get_mut(&page.path) {
             merge_scanned_page(existing, page);
         } else {
@@ -736,7 +739,12 @@ fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
 fn assign_page_ids(mut pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
     let mut used_ids = BTreeSet::new();
     for page in &mut pages {
-        page.page_id = unique_page_id(&page.title, &page.path, &mut used_ids);
+        let identifier = page
+            .snapshot_id
+            .clone()
+            .or_else(|| page.state_hints.get("wizard-step").map(|step| format!("{}-{}", page.path, step)))
+            .unwrap_or_else(|| page.title.clone());
+        page.page_id = unique_page_id(&identifier, &page.path, &mut used_ids);
     }
     pages
 }
@@ -2392,15 +2400,20 @@ fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
         .iter()
         .map(|page| (page.path.clone(), page.page_id.clone()))
         .collect::<BTreeMap<_, _>>();
+    let snapshot_parent_by_id = infer_snapshot_drill_parents(pages, &page_id_by_path);
     let mut parent_by_id = BTreeMap::<String, Option<String>>::new();
     for page in pages {
-        let segments = split_path_segments(&page.path);
-        let parent = infer_drill_parent(
-            &page.path,
-            &segments,
-            &page.breadcrumb_paths,
-            &page_id_by_path,
-        )
+        let parent = if let Some(snapshot_parent) = snapshot_parent_by_id.get(&page.page_id) {
+            Some(snapshot_parent.clone())
+        } else {
+            let segments = split_path_segments(&page.path);
+            infer_drill_parent(
+                &page.path,
+                &segments,
+                &page.breadcrumb_paths,
+                &page_id_by_path,
+            )
+        }
         .filter(|parent_id| parent_id != &page.page_id);
         parent_by_id.insert(page.page_id.clone(), parent);
     }
@@ -2434,6 +2447,58 @@ fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
         );
     }
     section
+}
+
+fn infer_snapshot_drill_parents(
+    pages: &[ScannedPage],
+    page_id_by_path: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut groups = BTreeMap::<(String, String), Vec<&ScannedPage>>::new();
+    for page in pages {
+        let Some(snapshot_url) = &page.snapshot_url else {
+            continue;
+        };
+        if &page.path == snapshot_url {
+            continue;
+        }
+        let modal = page.state_hints.get("modal").cloned().unwrap_or_default();
+        groups
+            .entry((snapshot_url.clone(), modal))
+            .or_default()
+            .push(page);
+    }
+
+    let mut parents = BTreeMap::new();
+    for ((snapshot_url, _modal), mut group_pages) in groups {
+        group_pages.sort_by(|left, right| {
+            snapshot_step_rank(left)
+                .cmp(&snapshot_step_rank(right))
+                .then(left.path.cmp(&right.path))
+                .then(left.snapshot_id.cmp(&right.snapshot_id))
+        });
+        let mut previous_parent = page_id_by_path.get(&snapshot_url).cloned();
+        for page in group_pages {
+            if let Some(parent_id) = &previous_parent {
+                parents.insert(page.page_id.clone(), parent_id.clone());
+            }
+            previous_parent = Some(page.page_id.clone());
+        }
+    }
+    parents
+}
+
+fn snapshot_step_rank(page: &ScannedPage) -> usize {
+    match page.state_hints.get("wizard-step").map(String::as_str) {
+        Some("about") => 10,
+        Some("pirType") | Some("type") => 20,
+        Some("industryAudience") => 30,
+        Some("aiRecommend") => 40,
+        Some("selection") => 50,
+        Some("aiChat") => 60,
+        Some("customPirList") => 70,
+        Some(_) => 500,
+        None => 1000,
+    }
 }
 
 fn infer_drill_parent(
@@ -4201,7 +4266,17 @@ node:
         let result = scan_html_paths_with_stage([&manifest], ScanStage::Summary).expect("scan");
         validate_document(&result.document).expect("validate");
 
-        let page = &result.document.node["Pir"];
+        let page = result
+            .document
+            .node
+            .values()
+            .find(|spec| {
+                matches!(
+                    spec.attrs.get("snapshot-id"),
+                    Some(AttrValue::Scalar(value)) if value == "pir-wizard-type"
+                )
+            })
+            .expect("snapshot page");
         let snapshot_id = match page.attrs.get("snapshot-id") {
             Some(AttrValue::Scalar(value)) => value.as_str(),
             _ => "",
