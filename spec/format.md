@@ -2,48 +2,59 @@
 
 ## Core model
 
-Each page is a node with up to two parent relations:
+Each GUI model is defined by four main parts:
 
-- `inherits-from`: visual or behavioral inheritance
-- `drilldown-from`: semantic drill-down in the information space
+- `inherit`: a forest for visual or behavioral inheritance
+- `drill`: a forest for semantic drill-down in the information space
+- `nav`: shared navigation components with target page sets
+- `pages`: page objects that acquire navs and other shared components through `traits`
 
-Each page may also have:
+The model intentionally does not require a top-level `transitions` section.
+Many practical transitions are derived from:
 
-- `traits`: reusable shared navigators, layouts, or capabilities
-- `transitions`: navigation edges between pages
-- `groups`: optional clusters for analysis or visualization
+- movement along the `drill` tree
+- selection of a target in a `nav`
 
 ## Minimal shape
 
 ```yaml
 app: Example
 
-traits:
-  - GlobalNav
+nav:
+  - id: GlobalNav
+    targets: [Home]
+
+inherit:
+  RootLayout:
+    - Home
+
+drill:
+  Home: []
 
 pages:
   - id: Home
-    title: Home
     path: /
     traits: [GlobalNav]
-
-transitions:
-  - from: Home
-    to: Home
 ```
 
 ## Rules
 
-- `id` must be unique within a file.
-- `inherits-from` is optional and singular.
-- `drilldown-from` is optional and singular.
-- `traits` is a set.
-- `transitions` is a list of directed edges.
+- `page.id` must be unique within a file.
+- a page may appear in at most one place in the `inherit` forest.
+- a page may appear in at most one place in the `drill` forest.
+- `nav.targets` is a page id set.
+- `traits` is a set of shared component ids, including nav ids.
 - `groups` is optional and may overlap.
 
 ## Intended visualization
 
 - inheritance forest
 - drill-down forest
-- transition graph
+- nav overlay
 - trait/group overlays
+
+## Notes
+
+- `inherit` answers: what does this page share?
+- `drill` answers: what is this page drilling into?
+- `nav` answers: where can this shared navigator take the user?

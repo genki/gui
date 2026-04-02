@@ -1,13 +1,35 @@
 app: Demo
 
-traits:
-  - GlobalNav
-  - Searchable
-  - AuthRequired
-  - AdminShell
+nav:
+  - id: GlobalNav
+    title: Global Navigation
+    targets: [Home, Products, AdminRoot]
+
+  - id: ProductTabs
+    title: Product Tabs
+    targets: [ProductDetail, ProductReviews, ProductRelated]
+
+inherit:
+  RootLayout:
+    - Home
+    - Products
+    - ProductDetail
+    - ProductReviews
+    - ProductRelated
+    - AdminRoot:
+        - AdminUsers
+
+drill:
+  Home:
+    - Products:
+        - ProductDetail:
+            - ProductReviews
+            - ProductRelated
+    - AdminRoot:
+        - AdminUsers
 
 pages:
-  - id: Root
+  - id: Home
     title: Top
     path: /
     traits: [GlobalNav]
@@ -15,41 +37,35 @@ pages:
   - id: Products
     title: Products
     path: /products
-    drilldown-from: Root
-    traits: [GlobalNav, Searchable]
+    traits: [GlobalNav]
 
   - id: ProductDetail
     title: Product Detail
     path: /products/:id
-    inherits-from: Products
-    drilldown-from: Products
-    traits: [GlobalNav]
+    traits: [GlobalNav, ProductTabs]
+
+  - id: ProductReviews
+    title: Product Reviews
+    path: /products/:id/reviews
+    traits: [GlobalNav, ProductTabs]
+
+  - id: ProductRelated
+    title: Related Products
+    path: /products/:id/related
+    traits: [GlobalNav, ProductTabs]
 
   - id: AdminRoot
     title: Admin
     path: /admin
-    drilldown-from: Root
-    traits: [GlobalNav, AuthRequired, AdminShell]
+    traits: [GlobalNav]
 
   - id: AdminUsers
     title: User Admin
     path: /admin/users
-    inherits-from: AdminRoot
-    drilldown-from: AdminRoot
-    traits: [GlobalNav, AuthRequired, AdminShell]
-
-transitions:
-  - from: Root
-    to: Products
-  - from: Products
-    to: ProductDetail
-  - from: Root
-    to: AdminRoot
-  - from: AdminRoot
-    to: AdminUsers
+    traits: [GlobalNav]
 
 groups:
   - id: CommerceFlow
-    members: [Products, ProductDetail]
+    members: [Products, ProductDetail, ProductReviews, ProductRelated]
   - id: AdminFlow
     members: [AdminRoot, AdminUsers]

@@ -2,48 +2,53 @@
 
 Declarative `.gui` format for modeling GUI structure with two forests:
 
-- `inherits-from`: layout/navigation/capability inheritance
-- `drilldown-from`: information-space drill-down
+- `inherit`: layout/navigation/capability inheritance
+- `drill`: information-space drill-down
 
-The format also supports:
+The format treats `nav` as a first-class shared component.
 
-- `traits`: cross-cutting shared navigators or behaviors
-- `transitions`: screen-to-screen navigation edges
-- `groups`: optional analytical grouping
+- a `nav` holds a target page set
+- a `page` acquires navs through `traits`
+- many apparent transitions are derived from `drill` and `nav`
 
 ## Example
 
 ```gui
 app: Demo
 
-traits:
-  - GlobalNav
-  - AuthRequired
+nav:
+  - id: GlobalNav
+    targets: [Home, Products, AdminRoot]
+
+  - id: ProductTabs
+    targets: [ProductDetail, ProductReviews]
+
+inherit:
+  RootLayout:
+    - Products
+    - AdminRoot:
+        - AdminUsers
+
+drill:
+  Home:
+    - Products:
+        - ProductDetail:
+            - ProductReviews
+    - AdminRoot:
+        - AdminUsers
 
 pages:
   - id: Home
-    title: Home
     path: /
     traits: [GlobalNav]
 
   - id: Products
-    title: Products
     path: /products
-    drilldown-from: Home
     traits: [GlobalNav]
 
   - id: ProductDetail
-    title: Product Detail
     path: /products/:id
-    inherits-from: Products
-    drilldown-from: Products
-    traits: [GlobalNav]
-
-transitions:
-  - from: Home
-    to: Products
-  - from: Products
-    to: ProductDetail
+    traits: [GlobalNav, ProductTabs]
 ```
 
 ## Repository layout
