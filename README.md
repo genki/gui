@@ -126,6 +126,8 @@ gui scan page1.html page2.html
   - page host を解決できない場合は absolute URL を内部 page 候補に含めない
   - locale switcher、巨大 footer directory、巨大 docs index は nav/page 候補から抑制する
   - `dialog` / `role=dialog` / `aria-modal=true` を dialog node として抽出し、trigger 側 page に `opens` 関係を付ける
+  - dialog には `dialog-kind: generic|form|confirm|alert|consent|sheet|picker|promo` を推定付与する
+  - 複数 page で共通に開かれる dialog は `RootLayout` や部分 layout の `opens` へ昇格させる
   - link cluster の path 傾向から `CategoryNav` / `AccountNav` / `FooterNav` を推定する
   - 近似した nav cluster は統合し、重複気味の nav を減らす
   - 出力 `node` には `kind: page|section|layout|action|index|dialog` を付け、抽象化後の役割を明示する

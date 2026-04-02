@@ -107,6 +107,8 @@ struct LayoutGroup {
 #[derive(Debug, Clone)]
 struct ScannedDialog {
     dialog_id: String,
+    dom_id: Option<String>,
+    dialog_kind: String,
     title: String,
 }
 
@@ -302,6 +304,15 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     let layout_groups = infer_layout_groups(&scanned_pages, &nav, &root_nav_ids);
     let drill = build_drill_section(&scanned_pages);
     let section_page_ids = collect_section_page_ids(&drill);
+    let layout_open_ids = infer_layout_dialogs(pages, &layout_groups, &input_page_ids);
+    let layout_promoted_open_ids = layout_open_ids
+        .values()
+        .flat_map(|opens| opens.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let root_open_ids = infer_root_layout_dialogs(pages, &input_page_ids)
+        .difference(&layout_promoted_open_ids)
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     let mut node = BTreeMap::new();
     let mut root_layout = NodeSpec::default();
@@ -309,6 +320,12 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         root_layout
             .attrs
             .insert("nav".to_string(), AttrValue::Vector(root_nav_ids.clone()));
+    }
+    if !root_open_ids.is_empty() {
+        root_layout.attrs.insert(
+            "opens".to_string(),
+            AttrValue::Vector(root_open_ids.clone()),
+        );
     }
     root_layout
         .attrs
@@ -330,6 +347,11 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         if !layout_navs.is_empty() {
             attrs.insert("nav".to_string(), AttrValue::Vector(layout_navs));
         }
+        if let Some(opens) = layout_open_ids.get(&group.layout_id) {
+            if !opens.is_empty() {
+                attrs.insert("opens".to_string(), AttrValue::Vector(opens.clone()));
+            }
+        }
         attrs.insert("kind".to_string(), AttrValue::Scalar("layout".to_string()));
         node.insert(group.layout_id.clone(), NodeSpec { attrs });
     }
@@ -350,8 +372,20 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
                 attrs.insert("nav".to_string(), AttrValue::Vector(filtered));
             }
         }
-        if !page.opens.is_empty() {
-            attrs.insert("opens".to_string(), AttrValue::Vector(page.opens.clone()));
+        let layout_level_opens = layout_groups
+            .iter()
+            .find(|group| group.members.contains(&page.page_id))
+            .and_then(|group| layout_open_ids.get(&group.layout_id))
+            .cloned()
+            .unwrap_or_default();
+        let filtered_opens = page
+            .opens
+            .difference(&root_open_ids)
+            .filter(|dialog_id| !layout_level_opens.contains(*dialog_id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !filtered_opens.is_empty() {
+            attrs.insert("opens".to_string(), AttrValue::Vector(filtered_opens));
         }
         node.insert(page.page_id.clone(), NodeSpec { attrs });
     }
@@ -360,6 +394,10 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         for dialog in &page.dialogs {
             let mut attrs = BTreeMap::new();
             attrs.insert("kind".to_string(), AttrValue::Scalar("dialog".to_string()));
+            attrs.insert(
+                "dialog-kind".to_string(),
+                AttrValue::Scalar(dialog.dialog_kind.clone()),
+            );
             attrs.insert("title".to_string(), AttrValue::Scalar(dialog.title.clone()));
             node.insert(dialog.dialog_id.clone(), NodeSpec { attrs });
         }
@@ -873,12 +911,14 @@ fn extract_dialogs(html: &Html, page_title: &str) -> Vec<ScannedDialog> {
         let selector = Selector::parse(selector_text).expect("dialog selector");
         for element in html.select(&selector) {
             let title = extract_dialog_title(&element, &heading_selector, page_title);
+            let dom_id = element.value().attr("id").map(ToOwned::to_owned);
             let base = element
                 .value()
                 .attr("id")
                 .map(|id| make_identifier(id, ""))
                 .filter(|id| !id.is_empty())
                 .unwrap_or_else(|| make_identifier(&title, "Dialog"));
+            let dialog_kind = classify_dialog_kind(&element, dom_id.as_deref(), &title);
             let mut dialog_id = if base.ends_with("Dialog") {
                 base
             } else {
@@ -896,10 +936,51 @@ fn extract_dialogs(html: &Html, page_title: &str) -> Vec<ScannedDialog> {
                     }
                 }
             }
-            dialogs.push(ScannedDialog { dialog_id, title });
+            dialogs.push(ScannedDialog {
+                dialog_id,
+                dom_id,
+                dialog_kind,
+                title,
+            });
         }
     }
     dialogs
+}
+
+fn classify_dialog_kind(
+    element: &scraper::ElementRef<'_>,
+    dom_id: Option<&str>,
+    title: &str,
+) -> String {
+    let form_selector =
+        Selector::parse("form, input, textarea, select").expect("dialog form selector");
+    if element.select(&form_selector).next().is_some() {
+        return "form".to_string();
+    }
+    let lowered = format!(
+        "{} {}",
+        dom_id.unwrap_or_default().to_ascii_lowercase(),
+        title.to_ascii_lowercase()
+    );
+    if lowered.contains("confirm") || lowered.contains("確認") || lowered.contains("delete") {
+        return "confirm".to_string();
+    }
+    if lowered.contains("alert") || lowered.contains("warning") || lowered.contains("error") {
+        return "alert".to_string();
+    }
+    if lowered.contains("cookie") || lowered.contains("consent") || lowered.contains("privacy") {
+        return "consent".to_string();
+    }
+    if lowered.contains("menu") || lowered.contains("drawer") || lowered.contains("sheet") {
+        return "sheet".to_string();
+    }
+    if lowered.contains("picker") || lowered.contains("select") || lowered.contains("choose") {
+        return "picker".to_string();
+    }
+    if lowered.contains("promo") || lowered.contains("campaign") || lowered.contains("coupon") {
+        return "promo".to_string();
+    }
+    "generic".to_string()
 }
 
 fn extract_dialog_title(
@@ -981,28 +1062,66 @@ fn extract_dialog_opens(html: &Html, dialogs: &[ScannedDialog]) -> BTreeSet<Stri
     opens
 }
 
-fn build_dialog_dom_id_map(html: &Html, dialogs: &[ScannedDialog]) -> BTreeMap<String, String> {
-    let selectors = [
-        "dialog[id]",
-        "[role='dialog'][id]",
-        "[role='alertdialog'][id]",
-        "[aria-modal='true'][id]",
-    ];
+fn build_dialog_dom_id_map(_html: &Html, dialogs: &[ScannedDialog]) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    let mut idx = 0usize;
-    for selector_text in selectors {
-        let selector = Selector::parse(selector_text).expect("dialog selector");
-        for element in html.select(&selector) {
-            let Some(dom_id) = element.value().attr("id") else {
-                continue;
-            };
-            if let Some(dialog) = dialogs.get(idx) {
-                map.insert(dom_id.to_string(), dialog.dialog_id.clone());
-            }
-            idx += 1;
+    for dialog in dialogs {
+        if let Some(dom_id) = &dialog.dom_id {
+            map.insert(dom_id.clone(), dialog.dialog_id.clone());
         }
     }
     map
+}
+
+fn infer_root_layout_dialogs(
+    pages: &[ScannedPage],
+    input_page_ids: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let input_pages = pages
+        .iter()
+        .filter(|page| input_page_ids.contains(&page.page_id))
+        .collect::<Vec<_>>();
+    if input_pages.len() < 2 {
+        return BTreeSet::new();
+    }
+    let mut iter = input_pages.into_iter().map(|page| page.opens.clone());
+    let Some(mut shared) = iter.next() else {
+        return BTreeSet::new();
+    };
+    for opens in iter {
+        shared = shared.intersection(&opens).cloned().collect();
+    }
+    shared
+}
+
+fn infer_layout_dialogs(
+    pages: &[ScannedPage],
+    layout_groups: &[LayoutGroup],
+    input_page_ids: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let page_map = pages
+        .iter()
+        .map(|page| (page.page_id.clone(), page))
+        .collect::<BTreeMap<_, _>>();
+    let mut out = BTreeMap::new();
+    for group in layout_groups {
+        let members = group
+            .members
+            .iter()
+            .filter(|page_id| input_page_ids.contains(*page_id))
+            .filter_map(|page_id| page_map.get(page_id).map(|page| page.opens.clone()))
+            .collect::<Vec<_>>();
+        if members.len() < 2 {
+            continue;
+        }
+        let mut shared = members[0].clone();
+        for opens in members.iter().skip(1) {
+            shared = shared.intersection(opens).cloned().collect();
+        }
+        if !shared.is_empty() {
+            out.insert(group.layout_id.clone(), shared);
+        }
+    }
+    out
 }
 
 fn resolve_dialog_id_from_target(
@@ -2829,11 +2948,67 @@ node:
             _ => "",
         };
         assert_eq!(dialog_kind, "dialog");
+        let dialog_subkind = match doc.node["CouponModalDialog"].attrs.get("dialog-kind") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        assert_eq!(dialog_subkind, "promo");
         let opens = match doc.node["Checkout"].attrs.get("opens") {
             Some(AttrValue::Vector(values)) => values,
             _ => panic!("missing opens"),
         };
         assert!(opens.contains("CouponModalDialog"));
+    }
+
+    #[test]
+    fn scan_promotes_shared_dialog_to_layout_opens() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-dialog-layout-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let my = dir.join("my.html");
+        let orders = dir.join("orders.html");
+        let body = r#"
+  <body>
+    <button aria-controls="cookie-consent" aria-haspopup="dialog">Cookie settings</button>
+    <dialog id="cookie-consent" aria-label="Cookie consent">
+      <form>
+        <button>Save</button>
+      </form>
+    </dialog>
+  </body>
+"#;
+        fs::write(
+            &my,
+            format!(
+                "<!doctype html><html><head><title>My</title><link rel=\"canonical\" href=\"https://example.test/my\" /></head>{body}</html>"
+            ),
+        )
+        .expect("write my");
+        fs::write(
+            &orders,
+            format!(
+                "<!doctype html><html><head><title>My Orders</title><link rel=\"canonical\" href=\"https://example.test/my/orders\" /></head>{body}</html>"
+            ),
+        )
+        .expect("write orders");
+
+        let doc = scan_html_paths([&my, &orders]).expect("scan");
+        validate_document(&doc).expect("validate scan result");
+        let layout_opens = match doc.node["AccountLayout"].attrs.get("opens") {
+            Some(AttrValue::Vector(values)) => values,
+            _ => panic!("missing layout opens"),
+        };
+        assert!(layout_opens.contains("CookieConsentDialog"));
+        assert!(!doc.node["My"].attrs.contains_key("opens"));
+        assert!(!doc.node["MyOrders"].attrs.contains_key("opens"));
+        let dialog_subkind = match doc.node["CookieConsentDialog"].attrs.get("dialog-kind") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        assert_eq!(dialog_subkind, "form");
     }
 
     #[test]
