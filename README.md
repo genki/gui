@@ -93,6 +93,7 @@ leaf は `Page:` のように null child で表現でき、loader/preparser は 
 
 - `examples/`: sample `.gui` files
 - `spec/`: draft format specification
+- `spec/scan.md`: design draft for future `gui scan` HTML-to-GUI pipeline
 
 ## CLI
 
