@@ -273,6 +273,9 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
             .attrs
             .insert("nav".to_string(), AttrValue::Vector(root_nav_ids.clone()));
     }
+    root_layout
+        .attrs
+        .insert("kind".to_string(), AttrValue::Scalar("layout".to_string()));
     node.insert("RootLayout".to_string(), root_layout);
 
     for group in &layout_groups {
@@ -290,11 +293,13 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         if !layout_navs.is_empty() {
             attrs.insert("nav".to_string(), AttrValue::Vector(layout_navs));
         }
+        attrs.insert("kind".to_string(), AttrValue::Scalar("layout".to_string()));
         node.insert(group.layout_id.clone(), NodeSpec { attrs });
     }
 
     for page in &scanned_pages {
         let mut attrs = BTreeMap::new();
+        attrs.insert("kind".to_string(), AttrValue::Scalar("page".to_string()));
         attrs.insert("title".to_string(), AttrValue::Scalar(page.title.clone()));
         attrs.insert("path".to_string(), AttrValue::Scalar(page.path.clone()));
         if let Some(nav_ids) = nav_usage.get(&page.page_id) {
@@ -802,25 +807,16 @@ fn make_identifier(input: &str, fallback: &str) -> String {
 }
 
 fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
+    let page_id_by_path = pages
+        .iter()
+        .map(|page| (page.path.clone(), page.page_id.clone()))
+        .collect::<BTreeMap<_, _>>();
     let mut parent_by_id = BTreeMap::<String, Option<String>>::new();
     for page in pages {
         let segments = split_path_segments(&page.path);
-        let mut best_parent = None;
-        let mut best_len = 0usize;
-        for candidate in pages {
-            if candidate.page_id == page.page_id {
-                continue;
-            }
-            let candidate_segments = split_path_segments(&candidate.path);
-            if candidate_segments.len() >= segments.len() {
-                continue;
-            }
-            if segments.starts_with(&candidate_segments) && candidate_segments.len() > best_len {
-                best_len = candidate_segments.len();
-                best_parent = Some(candidate.page_id.clone());
-            }
-        }
-        parent_by_id.insert(page.page_id.clone(), best_parent);
+        let parent = infer_drill_parent(&page.path, &segments, &page_id_by_path)
+            .filter(|parent_id| parent_id != &page.page_id);
+        parent_by_id.insert(page.page_id.clone(), parent);
     }
 
     let mut children_by_parent = BTreeMap::<String, Vec<String>>::new();
@@ -852,6 +848,30 @@ fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
         );
     }
     section
+}
+
+fn infer_drill_parent(
+    path: &str,
+    segments: &[&str],
+    page_id_by_path: &BTreeMap<String, String>,
+) -> Option<String> {
+    if path == "/" || segments.is_empty() {
+        return None;
+    }
+
+    if segments.len() >= 2 {
+        let direct_parent_path = format!("/{}", segments[..segments.len() - 1].join("/"));
+        if let Some(parent_id) = page_id_by_path.get(&direct_parent_path) {
+            return Some(parent_id.clone());
+        }
+    }
+
+    let section_root_path = format!("/{}", segments[0]);
+    if let Some(parent_id) = page_id_by_path.get(&section_root_path) {
+        return Some(parent_id.clone());
+    }
+
+    None
 }
 
 fn build_drill_children(
@@ -1541,8 +1561,8 @@ mod tests {
     };
 
     use super::{
-        load_document_from_path, load_documents_from_paths, parse_document, render_document,
-        scan_html_paths, validate_document,
+        build_drill_section, load_document_from_path, load_documents_from_paths, parse_document,
+        render_document, scan_html_paths, validate_document, ScannedPage, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -1761,5 +1781,38 @@ node:
         assert!(doc.node.contains_key("Ranking"));
         assert_eq!(doc.nav["CategoryNav"].len(), 4);
         assert!(!doc.node["ExampleShop"].attrs.contains_key("nav"));
+    }
+
+    #[test]
+    fn drill_prefers_direct_parent_then_section_root() {
+        let home = ScannedPage {
+            page_id: "Home".to_string(),
+            title: "Home".to_string(),
+            path: "/".to_string(),
+            nav_candidates: Vec::new(),
+        };
+        let docs = ScannedPage {
+            page_id: "Docs".to_string(),
+            title: "Docs".to_string(),
+            path: "/docs".to_string(),
+            nav_candidates: Vec::new(),
+        };
+        let guide = ScannedPage {
+            page_id: "Guide".to_string(),
+            title: "Guide".to_string(),
+            path: "/docs/guide".to_string(),
+            nav_candidates: Vec::new(),
+        };
+        let advanced = ScannedPage {
+            page_id: "Advanced".to_string(),
+            title: "Advanced".to_string(),
+            path: "/docs/category/advanced".to_string(),
+            nav_candidates: Vec::new(),
+        };
+
+        let drill = build_drill_section(&[home, docs, guide, advanced]);
+        let docs_children = drill.get("Docs").expect("docs root");
+        assert!(docs_children.contains(&TreeChild::Leaf("Guide".to_string())));
+        assert!(docs_children.contains(&TreeChild::Leaf("Advanced".to_string())));
     }
 }
