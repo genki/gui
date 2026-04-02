@@ -68,6 +68,7 @@ struct ScannedPage {
     dialogs: Vec<ScannedDialog>,
     opens: BTreeSet<String>,
     controls: Vec<ScannedControl>,
+    steppers: Vec<ScannedStepper>,
     snapshot_id: Option<String>,
     snapshot_url: Option<String>,
     snapshot_actions: Vec<String>,
@@ -78,6 +79,7 @@ struct ScannedPage {
 struct NavCandidate {
     label: Option<String>,
     targets: Vec<ScannedTarget>,
+    score: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +118,12 @@ struct ScannedDialog {
     dom_id: Option<String>,
     dialog_kind: String,
     title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScannedStepper {
+    labels: Vec<String>,
+    active_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +178,7 @@ struct ScanSummaryPage {
     dialogs: Vec<ScanSummaryDialog>,
     nav_candidates: Vec<ScanSummaryNavCandidate>,
     controls: Vec<ScannedControl>,
+    steppers: Vec<ScannedStepper>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,6 +280,7 @@ where
         let dialogs = extract_dialogs(&html, &title);
         let opens = extract_dialog_opens(&html, &dialogs);
         let controls = extract_controls(&html);
+        let steppers = extract_steppers(&html);
         scanned_pages.push(ScannedPage {
             breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
             nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path),
@@ -282,6 +292,7 @@ where
             dialogs,
             opens,
             controls,
+            steppers,
             snapshot_id: input.snapshot_id,
             snapshot_url: input.snapshot_url,
             snapshot_actions: input.snapshot_actions,
@@ -430,6 +441,7 @@ fn build_scan_summary(pages: &[ScannedPage]) -> ScanSummary {
                     })
                     .collect(),
                 controls: page.controls.clone(),
+                steppers: page.steppers.clone(),
             })
             .collect(),
     }
@@ -509,6 +521,7 @@ fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary) -> CompareRep
         compare_page_hints(key, left_page, right_page, &mut findings);
         compare_page_dialogs(key, left_page, right_page, &mut findings);
         compare_page_controls(key, left_page, right_page, &mut findings);
+        compare_page_steppers(key, left_page, right_page, &mut findings);
         compare_page_nav(key, left_page, right_page, &mut findings);
     }
 
@@ -616,6 +629,44 @@ fn compare_page_controls(
             });
         }
     }
+}
+
+fn compare_page_steppers(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_steppers = left
+        .steppers
+        .iter()
+        .map(stepper_key)
+        .collect::<BTreeSet<_>>();
+    let right_steppers = right
+        .steppers
+        .iter()
+        .map(stepper_key)
+        .collect::<BTreeSet<_>>();
+    for stepper in left_steppers.difference(&right_steppers) {
+        findings.push(CompareFinding {
+            kind: "stepper-mismatch".to_string(),
+            message: format!("state `{key}` で right に stepper `{stepper}` が無い"),
+        });
+    }
+    for stepper in right_steppers.difference(&left_steppers) {
+        findings.push(CompareFinding {
+            kind: "unexpected-stepper".to_string(),
+            message: format!("state `{key}` で right にのみ stepper `{stepper}` がある"),
+        });
+    }
+}
+
+fn stepper_key(stepper: &ScannedStepper) -> String {
+    format!(
+        "{} => {}",
+        stepper.labels.join(" > "),
+        stepper.active_label.clone().unwrap_or_default()
+    )
 }
 
 fn compare_page_nav(
@@ -733,6 +784,9 @@ fn merge_scanned_page(into: &mut ScannedPage, from: ScannedPage) {
     if into.controls.is_empty() {
         into.controls = from.controls.clone();
     }
+    if into.steppers.is_empty() {
+        into.steppers = from.steppers.clone();
+    }
 }
 
 
@@ -841,6 +895,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
                         dialogs: Vec::new(),
                         opens: BTreeSet::new(),
                         controls: Vec::new(),
+                        steppers: Vec::new(),
                         snapshot_id: None,
                         snapshot_url: None,
                         snapshot_actions: Vec::new(),
@@ -1128,6 +1183,111 @@ fn infer_page_path(path: &Path) -> String {
     }
 }
 
+fn extract_steppers(html: &Html) -> Vec<ScannedStepper> {
+    let mut steppers = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    let indicator_selector = Selector::parse("[data-testid^='step-indicator-']").expect("step indicator selector");
+    let label_selector = Selector::parse("span").expect("step label selector");
+    let mut indicator_labels = Vec::new();
+    let mut indicator_active = None;
+    for indicator in html.select(&indicator_selector) {
+        let label = indicator
+            .parent()
+            .and_then(scraper::ElementRef::wrap)
+            .and_then(|parent| {
+                parent
+                    .select(&label_selector)
+                    .find_map(|span| {
+                        let text = collapse_text(span.text().collect::<String>());
+                        if looks_like_stepper_label(&text) {
+                            Some(text)
+                        } else {
+                            None
+                        }
+                    })
+            });
+        let Some(label) = label else {
+            continue;
+        };
+        let class_name = indicator.value().attr("class").unwrap_or_default();
+        if class_name.contains("bg-primary") || class_name.contains("text-primary-foreground") {
+            indicator_active = Some(label.clone());
+        }
+        if indicator_labels.last() != Some(&label) && !indicator_labels.contains(&label) {
+            indicator_labels.push(label);
+        }
+    }
+    if indicator_labels.len() >= 2 {
+        let fingerprint = format!(
+            "{}|{}",
+            indicator_labels.join("|"),
+            indicator_active.clone().unwrap_or_default()
+        );
+        if seen.insert(fingerprint) {
+            steppers.push(ScannedStepper {
+                labels: indicator_labels,
+                active_label: indicator_active,
+            });
+        }
+    }
+
+    let selectors = [
+        "[role='tablist']",
+        "[data-slot*='tabs-list']",
+        "[class*='step']",
+        "[class*='wizard']",
+    ];
+    let item_selector = Selector::parse("button, [role='tab'], [role='button'], span, div").expect("stepper item selector");
+    for selector_text in selectors {
+        let selector = Selector::parse(selector_text).expect("stepper selector");
+        for container in html.select(&selector) {
+            let mut labels = Vec::new();
+            let mut active_label = None;
+            for item in container.select(&item_selector) {
+                let label = collapse_text(item.text().collect::<String>());
+                if label.is_empty() || label.len() > 40 || label.chars().all(|ch| ch.is_ascii_digit()) {
+                    continue;
+                }
+                if !looks_like_stepper_label(&label) {
+                    continue;
+                }
+                if matches!(item.value().attr("aria-selected"), Some("true"))
+                    || matches!(item.value().attr("data-state"), Some("active") | Some("open"))
+                {
+                    active_label = Some(label.clone());
+                }
+                if labels.last() != Some(&label) && !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            if labels.len() < 2 {
+                continue;
+            }
+            let fingerprint = format!("{}|{}", labels.join("|"), active_label.clone().unwrap_or_default());
+            if !seen.insert(fingerprint) {
+                continue;
+            }
+            steppers.push(ScannedStepper { labels, active_label });
+        }
+    }
+    steppers
+}
+
+fn looks_like_stepper_label(label: &str) -> bool {
+    let compact = collapse_text(label.to_string());
+    if compact.is_empty() {
+        return false;
+    }
+    let lowered = compact.to_ascii_lowercase();
+    compact.contains("PIR")
+        || compact.contains("選択")
+        || compact.contains("種類")
+        || compact.contains("設定")
+        || compact.contains("ガイド")
+        || lowered.contains("step")
+}
+
 fn extract_controls(html: &Html) -> Vec<ScannedControl> {
     let selector = Selector::parse(
         "button, [role='button'], [role='tab'], [role='switch'], input[type='button'], input[type='submit']",
@@ -1207,6 +1367,10 @@ fn extract_nav_candidates(
     page_path: &str,
 ) -> Vec<NavCandidate> {
     let selectors = [
+        "aside",
+        "[role='complementary']",
+        "[class*='sidebar']",
+        "[data-sidebar]",
         "nav",
         "[role='navigation']",
         "[role='tablist']",
@@ -1250,6 +1414,7 @@ fn extract_nav_candidates(
             let candidate = NavCandidate {
                 label: extract_container_label(&container),
                 targets: targets.into_values().collect(),
+                score: score_nav_candidate(&container, &meta),
             };
             if !candidate.targets.is_empty()
                 && !should_skip_nav_candidate(&candidate, &meta, page_path)
@@ -1259,16 +1424,21 @@ fn extract_nav_candidates(
         }
     }
     candidates.sort_by(|left, right| {
-        left.targets
-            .iter()
-            .map(|target| target.path.as_str())
-            .collect::<Vec<_>>()
-            .cmp(
-                &right
-                    .targets
+        right
+            .score
+            .cmp(&left.score)
+            .then(
+                left.targets
                     .iter()
                     .map(|target| target.path.as_str())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .cmp(
+                        &right
+                            .targets
+                            .iter()
+                            .map(|target| target.path.as_str())
+                            .collect::<Vec<_>>(),
+                    ),
             )
     });
     candidates.dedup_by(|left, right| {
@@ -1344,6 +1514,39 @@ fn normalize_relative_href_to_path(href: &str) -> Option<String> {
     } else {
         normalize_logical_page_path(&format!("/{path}"))
     })
+}
+
+fn score_nav_candidate(element: &scraper::ElementRef<'_>, meta: &NavCandidateMeta) -> i32 {
+    let mut score = match meta.selector.as_str() {
+        "aside" | "[role='complementary']" | "[class*='sidebar']" | "[data-sidebar]" => 120,
+        "nav" | "[role='navigation']" => 90,
+        "[role='tablist']" => 80,
+        "header" => 40,
+        "footer" => -40,
+        _ => 0,
+    };
+    if let Some(label) = element.value().attr("aria-label") {
+        let lowered = label.to_ascii_lowercase();
+        if lowered.contains("main") || lowered.contains("global") {
+            score += 30;
+        }
+        if lowered.contains("footer") {
+            score -= 40;
+        }
+        if lowered.contains("side") {
+            score += 25;
+        }
+    }
+    if let Some(class_name) = element.value().attr("class") {
+        let lowered = class_name.to_ascii_lowercase();
+        if lowered.contains("sidebar") {
+            score += 35;
+        }
+        if lowered.contains("footer") {
+            score -= 30;
+        }
+    }
+    score
 }
 
 fn extract_container_label(element: &scraper::ElementRef<'_>) -> Option<String> {
@@ -1604,6 +1807,7 @@ fn has_large_docs_index_candidate(html: &Html, page_host: Option<&str>, page_pat
             let candidate = NavCandidate {
                 label: extract_container_label(&container),
                 targets: targets.into_values().collect(),
+                score: score_nav_candidate(&container, &NavCandidateMeta { selector: selector_text.to_string() }),
             };
             if is_docs_index_candidate(&candidate, page_path) {
                 return true;
@@ -3242,6 +3446,7 @@ node:
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
         controls: Vec::new(),
+        steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3257,6 +3462,7 @@ node:
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
         controls: Vec::new(),
+        steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3272,6 +3478,7 @@ node:
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
         controls: Vec::new(),
+        steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3287,6 +3494,7 @@ node:
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
         controls: Vec::new(),
+        steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3403,6 +3611,7 @@ node:
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
         controls: Vec::new(),
+        steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3418,6 +3627,7 @@ node:
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
         controls: Vec::new(),
+        steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3437,6 +3647,7 @@ node:
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
         controls: Vec::new(),
+        steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3464,6 +3675,7 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -3479,6 +3691,7 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -3494,6 +3707,7 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -3806,6 +4020,7 @@ node:
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: vec![NavCandidate {
                     label: Some("global".to_string()),
+                    score: 0,
                     targets: vec![
                         ScannedTarget {
                             path: "/".to_string(),
@@ -3821,6 +4036,7 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -3836,6 +4052,7 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::from(["WelcomeDialog".to_string()]),
             controls: Vec::new(),
+            steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -3875,6 +4092,10 @@ node:
   </head>
   <body>
     <button>PIR設定を変更</button>
+    <div class="wizard-header">
+      <div><div data-testid="step-indicator-about" class="bg-primary text-primary-foreground"></div><span>PIRとは</span></div>
+      <div><div data-testid="step-indicator-pirType" class="bg-muted text-muted-foreground"></div><span>PIR種類</span></div>
+    </div>
     <dialog id="pir-wizard" aria-label="PIR設定ウィザード"></dialog>
   </body>
 </html>"#,
@@ -3890,6 +4111,10 @@ node:
   </head>
   <body>
     <button>ブリーフィング通知設定</button>
+    <div class="wizard-header">
+      <div><div data-testid="step-indicator-about" class="bg-muted text-muted-foreground"></div><span>PIRとは</span></div>
+      <div><div data-testid="step-indicator-pirType" class="bg-primary text-primary-foreground"></div><span>PIR種類</span></div>
+    </div>
   </body>
 </html>"#,
         )
@@ -3922,6 +4147,7 @@ node:
         assert!(rendered.contains("[missing-dialog]"));
         assert!(rendered.contains("[missing-control]"));
         assert!(rendered.contains("[state-hint-mismatch]"));
+        assert!(rendered.contains("[stepper-mismatch]"));
 
         fs::remove_dir_all(&dir).ok();
     }
