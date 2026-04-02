@@ -1,0 +1,55 @@
+app: Demo
+
+traits:
+  - GlobalNav
+  - Searchable
+  - AuthRequired
+  - AdminShell
+
+pages:
+  - id: Root
+    title: Top
+    path: /
+    traits: [GlobalNav]
+
+  - id: Products
+    title: Products
+    path: /products
+    drilldown-from: Root
+    traits: [GlobalNav, Searchable]
+
+  - id: ProductDetail
+    title: Product Detail
+    path: /products/:id
+    inherits-from: Products
+    drilldown-from: Products
+    traits: [GlobalNav]
+
+  - id: AdminRoot
+    title: Admin
+    path: /admin
+    drilldown-from: Root
+    traits: [GlobalNav, AuthRequired, AdminShell]
+
+  - id: AdminUsers
+    title: User Admin
+    path: /admin/users
+    inherits-from: AdminRoot
+    drilldown-from: AdminRoot
+    traits: [GlobalNav, AuthRequired, AdminShell]
+
+transitions:
+  - from: Root
+    to: Products
+  - from: Products
+    to: ProductDetail
+  - from: Root
+    to: AdminRoot
+  - from: AdminRoot
+    to: AdminUsers
+
+groups:
+  - id: CommerceFlow
+    members: [Products, ProductDetail]
+  - id: AdminFlow
+    members: [AdminRoot, AdminUsers]
