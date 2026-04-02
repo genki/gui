@@ -116,6 +116,11 @@ gui scan page1.html page2.html
 引数を省略した場合は、実行ディレクトリ配下を再帰走査して見つかったすべての
 `*.gui` を 1 つの入力集合として merge してから各コマンドを実行します。
 明示的に複数ファイルを渡した場合も同じく merge 後の和集合に対して実行します。
+入力引数にディレクトリを渡した場合は、その配下を再帰走査して適合するファイルを
+入力集合に追加します。
+
+- `check`, `page`, `drill`, `inherit`, `node`, `nav`: `*.gui`
+- `scan`: `*.html`, `*.htm`
 
 - `page`: page 条件に合致する node 一覧
 - `drill`: `drill` 木を indent 付きで表示
