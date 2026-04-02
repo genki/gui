@@ -7,7 +7,7 @@ Each GUI model is defined by four main parts:
 - `drill`: a forest for semantic drill-down in the information space
 - `inherit`: a forest for visual or behavioral inheritance
 - `nav`: named ordered target page lists
-- `nodes`: attributed nodes keyed by node id
+- `node`: attributed nodes keyed by node id
 
 Every `inherit` leaf is a page.
 Every node that appears in the `drill` forest is a page.
@@ -39,7 +39,7 @@ nav:
   GlobalNav:
     - Home
 
-nodes:
+node:
   RootLayout:
     nav: [GlobalNav]
 
@@ -49,7 +49,7 @@ nodes:
 
 ## Rules
 
-- `nodes` is a map keyed by unique node id.
+- `node` is a map keyed by unique node id.
 - every `inherit` leaf is a page.
 - every node that appears in `drill` is a page.
 - a non-leaf `inherit` node is not necessarily a page.

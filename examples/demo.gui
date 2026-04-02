@@ -31,41 +31,43 @@ nav:
     - ProductReviews
     - ProductRelated
 
-pages:
+node:
+  RootLayout:
+    nav: [GlobalNav]
+
+  AdminShell:
+    nav: [GlobalNav]
+
   Home:
     title: Top
     path: /
-    nav: [GlobalNav]
 
   Products:
     title: Products
     path: /products
-    nav: [GlobalNav]
 
   ProductDetail:
     title: Product Detail
     path: /products/:id
-    nav: [GlobalNav, ProductTabs]
+    nav: [ProductTabs]
 
   ProductReviews:
     title: Product Reviews
     path: /products/:id/reviews
-    nav: [GlobalNav, ProductTabs]
+    nav: [ProductTabs]
 
   ProductRelated:
     title: Related Products
     path: /products/:id/related
-    nav: [GlobalNav, ProductTabs]
+    nav: [ProductTabs]
 
   AdminRoot:
     title: Admin
     path: /admin
-    nav: [GlobalNav]
 
   AdminUsers:
     title: User Admin
     path: /admin/users
-    nav: [GlobalNav]
 
 groups:
   - id: CommerceFlow

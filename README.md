@@ -46,7 +46,7 @@ nav:
     - ProductDetail
     - ProductReviews
 
-nodes:
+node:
   RootLayout:
     nav: [GlobalNav]
 
