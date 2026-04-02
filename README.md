@@ -8,7 +8,7 @@ Declarative `.gui` format for modeling GUI structure with two forests:
 The format treats `nav` as a first-class shared component.
 
 - a `nav` is a named ordered target page list
-- a `page` acquires navs through `traits`
+- a `page` directly declares the navs it exposes
 - many apparent transitions are derived from `drill` and `nav`
 
 ## Example
@@ -41,17 +41,24 @@ drill:
         - AdminUsers
 
 pages:
-  - id: Home
+  Home:
     path: /
-    traits: [GlobalNav]
+    nav: [GlobalNav]
 
-  - id: Products
+  Products:
     path: /products
-    traits: [GlobalNav]
+    nav: [GlobalNav]
 
-  - id: ProductDetail
+  ProductDetail:
     path: /products/:id
-    traits: [GlobalNav, ProductTabs]
+    nav: [GlobalNav, ProductTabs]
+```
+
+`foo: [bar]` is shorthand for:
+
+```gui
+foo:
+  - bar
 ```
 
 ## Repository layout

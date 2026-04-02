@@ -31,40 +31,40 @@ drill:
         - AdminUsers
 
 pages:
-  - id: Home
+  Home:
     title: Top
     path: /
-    traits: [GlobalNav]
+    nav: [GlobalNav]
 
-  - id: Products
+  Products:
     title: Products
     path: /products
-    traits: [GlobalNav]
+    nav: [GlobalNav]
 
-  - id: ProductDetail
+  ProductDetail:
     title: Product Detail
     path: /products/:id
-    traits: [GlobalNav, ProductTabs]
+    nav: [GlobalNav, ProductTabs]
 
-  - id: ProductReviews
+  ProductReviews:
     title: Product Reviews
     path: /products/:id/reviews
-    traits: [GlobalNav, ProductTabs]
+    nav: [GlobalNav, ProductTabs]
 
-  - id: ProductRelated
+  ProductRelated:
     title: Related Products
     path: /products/:id/related
-    traits: [GlobalNav, ProductTabs]
+    nav: [GlobalNav, ProductTabs]
 
-  - id: AdminRoot
+  AdminRoot:
     title: Admin
     path: /admin
-    traits: [GlobalNav]
+    nav: [GlobalNav]
 
-  - id: AdminUsers
+  AdminUsers:
     title: User Admin
     path: /admin/users
-    traits: [GlobalNav]
+    nav: [GlobalNav]
 
 groups:
   - id: CommerceFlow
