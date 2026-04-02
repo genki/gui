@@ -2,8 +2,8 @@
 
 Declarative `.gui` format for modeling GUI structure with two forests:
 
-- `inherit`: layout/navigation/capability inheritance
 - `drill`: information-space drill-down
+- `inherit`: layout/navigation/capability inheritance
 
 The format treats `nav` as a first-class shared component.
 
@@ -18,15 +18,13 @@ The format treats `nav` as a first-class shared component.
 ```gui
 app: Demo
 
-nav:
-  GlobalNav:
-    - Home
-    - Products
-    - AdminRoot
-
-  ProductTabs:
-    - ProductDetail
-    - ProductReviews
+drill:
+  Home:
+    - Products:
+        - ProductDetail:
+            - ProductReviews
+    - AdminRoot:
+        - AdminUsers
 
 inherit:
   RootLayout:
@@ -36,13 +34,15 @@ inherit:
         - AdminRoot
         - AdminUsers
 
-drill:
-  Home:
-    - Products:
-        - ProductDetail:
-            - ProductReviews
-    - AdminRoot:
-        - AdminUsers
+nav:
+  GlobalNav:
+    - Home
+    - Products
+    - AdminRoot
+
+  ProductTabs:
+    - ProductDetail
+    - ProductReviews
 
 pages:
   Home:

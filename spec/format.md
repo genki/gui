@@ -4,8 +4,8 @@
 
 Each GUI model is defined by four main parts:
 
-- `inherit`: a forest for visual or behavioral inheritance
 - `drill`: a forest for semantic drill-down in the information space
+- `inherit`: a forest for visual or behavioral inheritance
 - `nav`: named ordered target page lists
 - `pages`: page objects keyed by page id
 
@@ -24,16 +24,16 @@ Many practical transitions are derived from:
 ```yaml
 app: Example
 
-nav:
-  GlobalNav:
-    - Home
+drill:
+  Home: []
 
 inherit:
   RootLayout:
     - Home
 
-drill:
-  Home: []
+nav:
+  GlobalNav:
+    - Home
 
 pages:
   Home:

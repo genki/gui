@@ -1,15 +1,13 @@
 app: Demo
 
-nav:
-  GlobalNav:
-    - Home
-    - Products
-    - AdminRoot
-
-  ProductTabs:
-    - ProductDetail
-    - ProductReviews
-    - ProductRelated
+drill:
+  Home:
+    - Products:
+        - ProductDetail:
+            - ProductReviews
+            - ProductRelated
+    - AdminRoot:
+        - AdminUsers
 
 inherit:
   RootLayout:
@@ -22,14 +20,16 @@ inherit:
         - AdminRoot:
             - AdminUsers
 
-drill:
-  Home:
-    - Products:
-        - ProductDetail:
-            - ProductReviews
-            - ProductRelated
-    - AdminRoot:
-        - AdminUsers
+nav:
+  GlobalNav:
+    - Home
+    - Products
+    - AdminRoot
+
+  ProductTabs:
+    - ProductDetail
+    - ProductReviews
+    - ProductRelated
 
 pages:
   Home:
