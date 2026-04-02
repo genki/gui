@@ -5,8 +5,10 @@ use std::{
 };
 
 use abstract_gui::{
-    load_documents_from_paths, page_nodes, render_document, scan_html_paths, validate_document,
-    Document, TreeChild, TreeSection,
+    compare_scan_inputs, compare_scan_inputs_with_config, load_documents_from_paths,
+    load_scan_config_from_path, page_nodes, render_compare_report, render_document,
+    render_scan_summary, scan_html_paths_with_stage, scan_html_paths_with_stage_and_config,
+    validate_document, Document, ScanStage, TreeChild, TreeSection,
 };
 
 fn main() {
@@ -18,17 +20,47 @@ fn main() {
     };
     if !matches!(
         command.as_str(),
-        "check" | "page" | "drill" | "inherit" | "node" | "nav" | "scan"
+        "check" | "page" | "drill" | "inherit" | "node" | "nav" | "scan" | "compare"
     ) {
         eprintln!("unknown command: {command}");
         print_usage(&program);
         process::exit(2);
     }
-    let raw_paths = args.collect::<Vec<_>>();
-    let paths = match if command == "scan" {
-        resolve_scan_input_paths(raw_paths)
-    } else {
-        resolve_input_paths(raw_paths)
+    let raw_args = args.collect::<Vec<_>>();
+
+    let (scan_stage, config_path, raw_paths) = match command.as_str() {
+        "scan" => match parse_scan_args(raw_args) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                eprintln!("{message}");
+                process::exit(2);
+            }
+        },
+        "compare" => match parse_compare_args(raw_args) {
+            Ok((config_path, paths)) => (ScanStage::Abstract, config_path, paths),
+            Err(message) => {
+                eprintln!("{message}");
+                process::exit(2);
+            }
+        },
+        _ => (ScanStage::Abstract, None, raw_args),
+    };
+
+    let config = match config_path {
+        Some(path) => match load_scan_config_from_path(&path) {
+            Ok(config) => Some(config),
+            Err(err) => {
+                eprintln!("config error: {}", err.message);
+                process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    let paths = match match command.as_str() {
+        "scan" => resolve_scan_input_paths(raw_paths),
+        "compare" => resolve_compare_input_paths(raw_paths),
+        _ => resolve_input_paths(raw_paths),
     } {
         Ok(paths) => paths,
         Err(message) => {
@@ -79,20 +111,42 @@ fn main() {
             }
         }
         "scan" => {
-            let doc = match scan_html_paths(paths.iter()) {
-                Ok(doc) => doc,
+            let result = match config.as_ref() {
+                Some(config) => scan_html_paths_with_stage_and_config(paths.iter(), scan_stage, config),
+                None => scan_html_paths_with_stage(paths.iter(), scan_stage),
+            };
+            let result = match result {
+                Ok(result) => result,
                 Err(err) => {
                     eprintln!("scan error: {}", err.message);
                     process::exit(1);
                 }
             };
+            let doc = result.document;
             if let Err(errors) = validate_document(&doc) {
                 for err in errors {
                     eprintln!("validation error: {}", err.message);
                 }
                 process::exit(1);
             }
-            print!("{}", render_document(&doc));
+            match scan_stage {
+                ScanStage::Abstract => print!("{}", render_document(&doc)),
+                ScanStage::Summary => print!("{}", render_scan_summary(&result.summary)),
+            }
+        }
+        "compare" => {
+            let report = match config.as_ref() {
+                Some(config) => compare_scan_inputs_with_config(&paths[0], &paths[1], config),
+                None => compare_scan_inputs(&paths[0], &paths[1]),
+            };
+            let report = match report {
+                Ok(report) => report,
+                Err(err) => {
+                    eprintln!("compare error: {}", err.message);
+                    process::exit(1);
+                }
+            };
+            print!("{}", render_compare_report(&report));
         }
         _ => unreachable!(),
     }
@@ -105,7 +159,9 @@ fn print_usage(program: &str) {
     eprintln!("       {program} inherit [file.gui ...]");
     eprintln!("       {program} node [file.gui ...]");
     eprintln!("       {program} nav [file.gui ...]");
-    eprintln!("       {program} scan <file.html> [more.html ...]");
+    eprintln!("       {program} scan [--config config.yaml] <file.html> [more.html ...]");
+    eprintln!("       {program} scan --stage summary [--config config.yaml] <file.html|snapshot.yaml> [...]");
+    eprintln!("       {program} compare [--config config.yaml] <left.html|left.yaml> <right.html|right.yaml>");
 }
 
 fn load_and_validate(paths: &[PathBuf]) -> Document {
@@ -146,11 +202,7 @@ fn print_tree_children(children: &[TreeChild], depth: usize) {
 }
 
 fn resolve_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
-    resolve_paths_by_extension(
-        paths,
-        &["gui"],
-        "no .gui files found under current directory",
-    )
+    resolve_paths_by_extension(paths, &["gui"], "no .gui files found under current directory")
 }
 
 fn collect_files_with_extensions(
@@ -185,9 +237,71 @@ fn collect_files_with_extensions(
 fn resolve_scan_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
     resolve_paths_by_extension(
         paths,
-        &["html", "htm"],
-        "scan requires at least one html file",
+        &["html", "htm", "yaml", "yml"],
+        "scan requires at least one html or yaml file",
     )
+}
+
+fn resolve_compare_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
+    let resolved = resolve_paths_by_extension(
+        paths,
+        &["html", "htm", "yaml", "yml"],
+        "compare requires exactly two html or yaml files",
+    )?;
+    if resolved.len() != 2 {
+        return Err("compare requires exactly two html or yaml files".to_string());
+    }
+    Ok(resolved)
+}
+
+fn parse_scan_args(args: Vec<String>) -> Result<(ScanStage, Option<PathBuf>, Vec<String>), String> {
+    let mut stage = ScanStage::Abstract;
+    let mut config = None;
+    let mut paths = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--stage" {
+            let Some(value) = iter.next() else {
+                return Err("--stage requires a value".to_string());
+            };
+            stage = match value.as_str() {
+                "abstract" => ScanStage::Abstract,
+                "summary" => ScanStage::Summary,
+                other => {
+                    return Err(format!(
+                        "unknown scan stage: {other} (expected: abstract, summary)"
+                    ))
+                }
+            };
+            continue;
+        }
+        if arg == "--config" {
+            let Some(value) = iter.next() else {
+                return Err("--config requires a value".to_string());
+            };
+            config = Some(PathBuf::from(value));
+            continue;
+        }
+        paths.push(arg);
+    }
+    Ok((stage, config, paths))
+}
+
+fn parse_compare_args(args: Vec<String>) -> Result<(Option<PathBuf>, Vec<String>), String> {
+    let mut config = None;
+    let mut paths = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--config" {
+            let Some(value) = iter.next() else {
+                return Err("--config requires a value".to_string());
+            };
+            config = Some(PathBuf::from(value));
+            continue;
+        }
+        paths.push(arg);
+    }
+    Ok((config, paths))
 }
 
 fn resolve_paths_by_extension(
@@ -226,9 +340,11 @@ fn resolve_paths_by_extension(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_input_paths, resolve_scan_input_paths};
+    use super::{parse_compare_args, parse_scan_args, resolve_compare_input_paths, resolve_input_paths, resolve_scan_input_paths};
+    use abstract_gui::ScanStage;
     use std::{
         fs,
+        path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -259,6 +375,40 @@ mod tests {
         assert!(resolved.iter().any(|path| path.ends_with("b.gui")));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_scan_args_supports_stage_and_config_flags() {
+        let (stage, config, paths) = parse_scan_args(vec![
+            "--stage".to_string(),
+            "summary".to_string(),
+            "--config".to_string(),
+            "scan.yaml".to_string(),
+            "sample.yaml".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(stage, ScanStage::Summary);
+        assert_eq!(config, Some(PathBuf::from("scan.yaml")));
+        assert_eq!(paths, vec!["sample.yaml".to_string()]);
+    }
+
+    #[test]
+    fn parse_compare_args_supports_config_flag() {
+        let (config, paths) = parse_compare_args(vec![
+            "--config".to_string(),
+            "scan.yaml".to_string(),
+            "left.html".to_string(),
+            "right.html".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(config, Some(PathBuf::from("scan.yaml")));
+        assert_eq!(paths, vec!["left.html".to_string(), "right.html".to_string()]);
+    }
+
+    #[test]
+    fn resolve_compare_input_paths_requires_two_inputs() {
+        let err = resolve_compare_input_paths(vec!["one.html".to_string()]).expect_err("should fail");
+        assert!(err.contains("exactly two"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::{
 };
 
 use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use url::Url;
 
@@ -66,12 +67,19 @@ struct ScannedPage {
     has_docs_index_candidate: bool,
     dialogs: Vec<ScannedDialog>,
     opens: BTreeSet<String>,
+    controls: Vec<ScannedControl>,
+    steppers: Vec<ScannedStepper>,
+    snapshot_id: Option<String>,
+    snapshot_url: Option<String>,
+    snapshot_actions: Vec<String>,
+    state_hints: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
 struct NavCandidate {
     label: Option<String>,
     targets: Vec<ScannedTarget>,
+    score: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +120,198 @@ struct ScannedDialog {
     title: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ScannedStepper {
+    labels: Vec<String>,
+    active_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScannedControl {
+    kind: String,
+    label: String,
+    active: bool,
+    selected: bool,
+    expanded: bool,
+    disabled: bool,
+    checked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStage {
+    Abstract,
+    Summary,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompareReport {
+    findings: Vec<CompareFinding>,
+}
+
+#[derive(Debug, Clone)]
+struct CompareFinding {
+    kind: String,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    pub document: Document,
+    pub summary: ScanSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ScanSummary {
+    pages: Vec<ScanSummaryPage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScanSummaryPage {
+    page_id: String,
+    title: String,
+    path: String,
+    snapshot_id: Option<String>,
+    snapshot_url: Option<String>,
+    state_hints: BTreeMap<String, String>,
+    snapshot_actions: Vec<String>,
+    opens: Vec<String>,
+    dialogs: Vec<ScanSummaryDialog>,
+    nav_candidates: Vec<ScanSummaryNavCandidate>,
+    controls: Vec<ScannedControl>,
+    steppers: Vec<ScannedStepper>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScanSummaryDialog {
+    id: String,
+    title: String,
+    dialog_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScanSummaryNavCandidate {
+    label: Option<String>,
+    targets: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ScanInput {
+    html_path: PathBuf,
+    snapshot_id: Option<String>,
+    snapshot_url: Option<String>,
+    snapshot_actions: Vec<String>,
+    state_hints: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotManifestFile {
+    snapshot: Option<SnapshotManifest>,
+    snapshots: Option<Vec<SnapshotManifest>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotManifest {
+    id: Option<String>,
+    url: Option<String>,
+    html: String,
+    actions: Option<Vec<Value>>,
+    #[serde(rename = "stateHints")]
+    state_hints: Option<BTreeMap<String, String>>,
+}
+
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScanConfig {
+    #[serde(default)]
+    pub stepper: StepperScanConfig,
+    #[serde(default)]
+    pub snapshot: SnapshotScanConfig,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            stepper: StepperScanConfig::default(),
+            snapshot: SnapshotScanConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StepperScanConfig {
+    #[serde(default = "default_stepper_container_selectors")]
+    pub container_selectors: Vec<String>,
+    #[serde(default)]
+    pub indicator_selectors: Vec<String>,
+    #[serde(default = "default_stepper_label_selectors")]
+    pub label_selectors: Vec<String>,
+    #[serde(default)]
+    pub active_class_contains: Vec<String>,
+    #[serde(default = "default_stepper_max_label_len")]
+    pub max_label_len: usize,
+    #[serde(default = "default_stepper_max_word_count")]
+    pub max_word_count: usize,
+}
+
+impl Default for StepperScanConfig {
+    fn default() -> Self {
+        Self {
+            container_selectors: default_stepper_container_selectors(),
+            indicator_selectors: Vec::new(),
+            label_selectors: default_stepper_label_selectors(),
+            active_class_contains: Vec::new(),
+            max_label_len: default_stepper_max_label_len(),
+            max_word_count: default_stepper_max_word_count(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SnapshotScanConfig {
+    #[serde(default)]
+    pub flow_hint_keys: Vec<String>,
+    #[serde(default)]
+    pub step_hint_keys: Vec<String>,
+}
+
+impl Default for SnapshotScanConfig {
+    fn default() -> Self {
+        Self {
+            flow_hint_keys: Vec::new(),
+            step_hint_keys: Vec::new(),
+        }
+    }
+}
+
+fn default_stepper_container_selectors() -> Vec<String> {
+    vec![
+        "[role='tablist']".to_string(),
+        "[data-slot*='tabs-list']".to_string(),
+        "[class*='step']".to_string(),
+        "[class*='wizard']".to_string(),
+    ]
+}
+
+fn default_stepper_label_selectors() -> Vec<String> {
+    vec!["span".to_string()]
+}
+
+fn default_stepper_max_label_len() -> usize {
+    40
+}
+
+fn default_stepper_max_word_count() -> usize {
+    6
+}
+
+pub fn load_scan_config_from_path(path: &Path) -> Result<ScanConfig, ValidationError> {
+    let raw = fs::read(path).map_err(|err| {
+        ValidationError::new(format!("failed to read config `{}`: {err}", path.display()))
+    })?;
+    serde_yaml::from_slice(&raw).map_err(|err| {
+        ValidationError::new(format!("failed to parse config `{}`: {err}", path.display()))
+    })
+}
 pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
     let mut stack = Vec::new();
     load_document_from_path_inner(path.as_ref(), &mut stack)
@@ -150,19 +350,42 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    Ok(scan_html_paths_with_stage_and_config(paths, ScanStage::Abstract, &ScanConfig::default())?.document)
+}
+
+pub fn scan_html_paths_with_stage<I, P>(paths: I, stage: ScanStage) -> Result<ScanResult, ValidationError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    scan_html_paths_with_stage_and_config(paths, stage, &ScanConfig::default())
+}
+
+pub fn scan_html_paths_with_stage_and_config<I, P>(
+    paths: I,
+    _stage: ScanStage,
+    config: &ScanConfig,
+) -> Result<ScanResult, ValidationError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let scan_inputs = load_scan_inputs(paths)?;
     let mut scanned_pages = Vec::new();
 
-    for path in paths {
-        let path_ref = path.as_ref();
-        let input = fs::read(path_ref).map_err(|err| {
+    for input in scan_inputs {
+        let path_ref = input.html_path.as_path();
+        let raw = fs::read(path_ref).map_err(|err| {
             ValidationError::new(format!("failed to read `{}`: {err}", path_ref.display()))
         })?;
-        let input = String::from_utf8_lossy(&input).into_owned();
-        let html = Html::parse_document(&input);
+        let raw = String::from_utf8_lossy(&raw).into_owned();
+        let html = Html::parse_document(&raw);
         let title = extract_title(&html).unwrap_or_else(|| infer_title_from_path(path_ref));
         let location = extract_page_location(&html, path_ref);
         let dialogs = extract_dialogs(&html, &title);
         let opens = extract_dialog_opens(&html, &dialogs);
+        let controls = extract_controls(&html);
+        let steppers = extract_steppers(&html, config);
         scanned_pages.push(ScannedPage {
             breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
             nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path),
@@ -173,6 +396,12 @@ where
             ),
             dialogs,
             opens,
+            controls,
+            steppers,
+            snapshot_id: input.snapshot_id,
+            snapshot_url: input.snapshot_url,
+            snapshot_actions: input.snapshot_actions,
+            state_hints: input.state_hints,
             page_id: String::new(),
             title,
             path: location.path,
@@ -180,12 +409,429 @@ where
     }
 
     if scanned_pages.is_empty() {
-        return Err(ValidationError::new("no html files matched input"));
+        return Err(ValidationError::new("no html or snapshot files matched input"));
     }
 
-    let pages = assign_page_ids(normalize_scanned_pages(scanned_pages));
+    let pages = assign_page_ids(normalize_scanned_pages(scanned_pages), config);
+    let document = document_from_scanned_pages(&pages, config);
+    let summary = build_scan_summary(&pages);
 
-    Ok(document_from_scanned_pages(&pages))
+    Ok(ScanResult { document, summary })
+}
+
+fn load_scan_inputs<I, P>(paths: I) -> Result<Vec<ScanInput>, ValidationError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut inputs = Vec::new();
+    for path in paths {
+        let path_ref = path.as_ref();
+        match path_ref
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("yaml") | Some("yml") => {
+                inputs.extend(load_scan_inputs_from_manifest(path_ref)?);
+            }
+            _ => {
+                inputs.push(ScanInput {
+                    html_path: path_ref.to_path_buf(),
+                    snapshot_id: None,
+                    snapshot_url: None,
+                    snapshot_actions: Vec::new(),
+                    state_hints: BTreeMap::new(),
+                });
+            }
+        }
+    }
+    Ok(inputs)
+}
+
+fn load_scan_inputs_from_manifest(path: &Path) -> Result<Vec<ScanInput>, ValidationError> {
+    let raw = fs::read(path).map_err(|err| {
+        ValidationError::new(format!("failed to read manifest `{}`: {err}", path.display()))
+    })?;
+    let manifest: SnapshotManifestFile = serde_yaml::from_slice(&raw).map_err(|err| {
+        ValidationError::new(format!("failed to parse manifest `{}`: {err}", path.display()))
+    })?;
+    let mut snapshots = Vec::new();
+    if let Some(snapshot) = manifest.snapshot {
+        snapshots.push(snapshot);
+    }
+    if let Some(more) = manifest.snapshots {
+        snapshots.extend(more);
+    }
+    if snapshots.is_empty() {
+        return Err(ValidationError::new(format!(
+            "manifest `{}` must define `snapshot` or `snapshots`",
+            path.display()
+        )));
+    }
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(snapshots
+        .into_iter()
+        .map(|snapshot| ScanInput {
+            html_path: base_dir.join(snapshot.html),
+            snapshot_id: snapshot.id,
+            snapshot_url: snapshot.url,
+            snapshot_actions: snapshot
+                .actions
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(stringify_snapshot_action)
+                .collect(),
+            state_hints: snapshot.state_hints.unwrap_or_default(),
+        })
+        .collect())
+}
+
+fn stringify_snapshot_action(value: Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(collapse_text(text)),
+        Value::Mapping(map) => {
+            let mut parts = Vec::new();
+            for (key, value) in map {
+                let key = key.as_str()?.trim().to_string();
+                let value = match value {
+                    Value::String(text) => collapse_text(text),
+                    other => collapse_text(serde_yaml::to_string(&other).ok()?.replace('\n', " ")),
+                };
+                parts.push(format!("{key}:{value}"));
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" | "))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn build_scan_summary(pages: &[ScannedPage]) -> ScanSummary {
+    ScanSummary {
+        pages: pages
+            .iter()
+            .map(|page| ScanSummaryPage {
+                page_id: page.page_id.clone(),
+                title: page.title.clone(),
+                path: page.path.clone(),
+                snapshot_id: page.snapshot_id.clone(),
+                snapshot_url: page.snapshot_url.clone(),
+                state_hints: page.state_hints.clone(),
+                snapshot_actions: page.snapshot_actions.clone(),
+                opens: page.opens.iter().cloned().collect(),
+                dialogs: page
+                    .dialogs
+                    .iter()
+                    .map(|dialog| ScanSummaryDialog {
+                        id: dialog.dialog_id.clone(),
+                        title: dialog.title.clone(),
+                        dialog_kind: dialog.dialog_kind.clone(),
+                    })
+                    .collect(),
+                nav_candidates: page
+                    .nav_candidates
+                    .iter()
+                    .map(|candidate| ScanSummaryNavCandidate {
+                        label: candidate.label.clone(),
+                        targets: candidate
+                            .targets
+                            .iter()
+                            .map(|target| target.path.clone())
+                            .collect(),
+                    })
+                    .collect(),
+                controls: page.controls.clone(),
+                steppers: page.steppers.clone(),
+            })
+            .collect(),
+    }
+}
+
+pub fn render_scan_summary(summary: &ScanSummary) -> String {
+    serde_yaml::to_string(summary).expect("scan summary yaml")
+}
+
+pub fn compare_scan_inputs<L, R>(left: L, right: R) -> Result<CompareReport, ValidationError>
+where
+    L: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    compare_scan_inputs_with_config(left, right, &ScanConfig::default())
+}
+
+pub fn compare_scan_inputs_with_config<L, R>(
+    left: L,
+    right: R,
+    config: &ScanConfig,
+) -> Result<CompareReport, ValidationError>
+where
+    L: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    let left_result = scan_html_paths_with_stage_and_config([left], ScanStage::Summary, config)?;
+    let right_result = scan_html_paths_with_stage_and_config([right], ScanStage::Summary, config)?;
+    Ok(compare_scan_summaries(&left_result.summary, &right_result.summary))
+}
+
+pub fn render_compare_report(report: &CompareReport) -> String {
+    if report.findings.is_empty() {
+        return "ok\n".to_string();
+    }
+    let mut out = String::new();
+    let mut current_kind = String::new();
+    for finding in &report.findings {
+        if finding.kind != current_kind {
+            if !current_kind.is_empty() {
+                out.push('\n');
+            }
+            current_kind = finding.kind.clone();
+            out.push('[');
+            out.push_str(&current_kind);
+            out.push_str("]\n");
+        }
+        out.push_str("- ");
+        out.push_str(&finding.message);
+        out.push('\n');
+    }
+    out
+}
+
+fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary) -> CompareReport {
+    let mut findings = Vec::new();
+    let left_pages = left
+        .pages
+        .iter()
+        .map(|page| (scan_summary_page_key(page), page))
+        .collect::<BTreeMap<_, _>>();
+    let right_pages = right
+        .pages
+        .iter()
+        .map(|page| (scan_summary_page_key(page), page))
+        .collect::<BTreeMap<_, _>>();
+
+    for key in left_pages.keys() {
+        if !right_pages.contains_key(key) {
+            findings.push(CompareFinding {
+                kind: "missing-state".to_string(),
+                message: format!("right に state `{key}` が存在しない"),
+            });
+        }
+    }
+    for key in right_pages.keys() {
+        if !left_pages.contains_key(key) {
+            findings.push(CompareFinding {
+                kind: "unexpected-state".to_string(),
+                message: format!("right にのみ state `{key}` が存在する"),
+            });
+        }
+    }
+
+    for (key, left_page) in &left_pages {
+        let Some(right_page) = right_pages.get(key) else {
+            continue;
+        };
+        compare_page_hints(key, left_page, right_page, &mut findings);
+        compare_page_dialogs(key, left_page, right_page, &mut findings);
+        compare_page_controls(key, left_page, right_page, &mut findings);
+        compare_page_steppers(key, left_page, right_page, &mut findings);
+        compare_page_nav(key, left_page, right_page, &mut findings);
+    }
+
+    findings.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.message.cmp(&b.message)));
+    CompareReport { findings }
+}
+
+fn scan_summary_page_key(page: &ScanSummaryPage) -> String {
+    page.snapshot_id.clone().unwrap_or_else(|| page.path.clone())
+}
+
+fn compare_page_hints(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let hint_keys = left
+        .state_hints
+        .keys()
+        .chain(right.state_hints.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for hint_key in hint_keys {
+        match (left.state_hints.get(&hint_key), right.state_hints.get(&hint_key)) {
+            (Some(l), Some(r)) if l != r => findings.push(CompareFinding {
+                kind: "state-hint-mismatch".to_string(),
+                message: format!("state `{key}` の hint `{hint_key}` が不一致: left=`{l}` right=`{r}`"),
+            }),
+            (Some(l), None) => findings.push(CompareFinding {
+                kind: "state-hint-mismatch".to_string(),
+                message: format!("state `{key}` の hint `{hint_key}` が right に無い: left=`{l}`"),
+            }),
+            (None, Some(r)) => findings.push(CompareFinding {
+                kind: "state-hint-mismatch".to_string(),
+                message: format!("state `{key}` の hint `{hint_key}` が left に無い: right=`{r}`"),
+            }),
+            _ => {}
+        }
+    }
+}
+
+fn compare_page_dialogs(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_dialogs = left
+        .dialogs
+        .iter()
+        .map(|dialog| dialog.title.clone())
+        .collect::<BTreeSet<_>>();
+    let right_dialogs = right
+        .dialogs
+        .iter()
+        .map(|dialog| dialog.title.clone())
+        .collect::<BTreeSet<_>>();
+    for title in left_dialogs.difference(&right_dialogs) {
+        findings.push(CompareFinding {
+            kind: "missing-dialog".to_string(),
+            message: format!("state `{key}` で right に dialog `{title}` が無い"),
+        });
+    }
+    for title in right_dialogs.difference(&left_dialogs) {
+        findings.push(CompareFinding {
+            kind: "unexpected-dialog".to_string(),
+            message: format!("state `{key}` で right にのみ dialog `{title}` がある"),
+        });
+    }
+}
+
+fn compare_page_controls(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_controls = left
+        .controls
+        .iter()
+        .map(|control| (control_key(control), control))
+        .collect::<BTreeMap<_, _>>();
+    let right_controls = right
+        .controls
+        .iter()
+        .map(|control| (control_key(control), control))
+        .collect::<BTreeMap<_, _>>();
+    for control_key_name in left_controls.keys() {
+        if !right_controls.contains_key(control_key_name) {
+            findings.push(CompareFinding {
+                kind: "missing-control".to_string(),
+                message: format!("state `{key}` で right に control `{control_key_name}` が無い"),
+            });
+        }
+    }
+    for (control_key_name, left_control) in &left_controls {
+        let Some(right_control) = right_controls.get(control_key_name) else {
+            continue;
+        };
+        for mismatch in compare_control_signals(left_control, right_control) {
+            findings.push(CompareFinding {
+                kind: "signal-mismatch".to_string(),
+                message: format!("state `{key}` の control `{control_key_name}` で {mismatch}"),
+            });
+        }
+    }
+}
+
+fn compare_page_steppers(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_steppers = left
+        .steppers
+        .iter()
+        .map(stepper_key)
+        .collect::<BTreeSet<_>>();
+    let right_steppers = right
+        .steppers
+        .iter()
+        .map(stepper_key)
+        .collect::<BTreeSet<_>>();
+    for stepper in left_steppers.difference(&right_steppers) {
+        findings.push(CompareFinding {
+            kind: "stepper-mismatch".to_string(),
+            message: format!("state `{key}` で right に stepper `{stepper}` が無い"),
+        });
+    }
+    for stepper in right_steppers.difference(&left_steppers) {
+        findings.push(CompareFinding {
+            kind: "unexpected-stepper".to_string(),
+            message: format!("state `{key}` で right にのみ stepper `{stepper}` がある"),
+        });
+    }
+}
+
+fn stepper_key(stepper: &ScannedStepper) -> String {
+    format!(
+        "{} => {}",
+        stepper.labels.join(" > "),
+        stepper.active_label.clone().unwrap_or_default()
+    )
+}
+
+fn compare_page_nav(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_nav = left
+        .nav_candidates
+        .iter()
+        .map(|candidate| candidate.targets.iter().cloned().collect::<BTreeSet<_>>())
+        .collect::<BTreeSet<_>>();
+    let right_nav = right
+        .nav_candidates
+        .iter()
+        .map(|candidate| candidate.targets.iter().cloned().collect::<BTreeSet<_>>())
+        .collect::<BTreeSet<_>>();
+    for targets in left_nav.difference(&right_nav) {
+        findings.push(CompareFinding {
+            kind: "nav-mismatch".to_string(),
+            message: format!("state `{key}` で right に nav target set {:?} が無い", targets),
+        });
+    }
+}
+
+fn control_key(control: &ScannedControl) -> String {
+    format!("{}:{}", control.kind, control.label)
+}
+
+fn compare_control_signals(left: &ScannedControl, right: &ScannedControl) -> Vec<String> {
+    let mut out = Vec::new();
+    if left.active != right.active {
+        out.push(format!("active mismatch left={} right={}", left.active, right.active));
+    }
+    if left.selected != right.selected {
+        out.push(format!("selected mismatch left={} right={}", left.selected, right.selected));
+    }
+    if left.expanded != right.expanded {
+        out.push(format!("expanded mismatch left={} right={}", left.expanded, right.expanded));
+    }
+    if left.disabled != right.disabled {
+        out.push(format!("disabled mismatch left={} right={}", left.disabled, right.disabled));
+    }
+    if left.checked != right.checked {
+        out.push(format!("checked mismatch left={} right={}", left.checked, right.checked));
+    }
+    out
 }
 
 fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
@@ -194,6 +840,9 @@ fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
         page.path = normalize_logical_page_path(&page.path);
         for breadcrumb in &mut page.breadcrumb_paths {
             *breadcrumb = normalize_logical_page_path(breadcrumb);
+        }
+        if let Some(snapshot_url) = &mut page.snapshot_url {
+            *snapshot_url = normalize_logical_page_path(snapshot_url);
         }
         if let Some(existing) = merged_by_path.get_mut(&page.path) {
             merge_scanned_page(existing, page);
@@ -204,10 +853,15 @@ fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
     merged_by_path.into_values().collect()
 }
 
-fn assign_page_ids(mut pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
+fn assign_page_ids(mut pages: Vec<ScannedPage>, config: &ScanConfig) -> Vec<ScannedPage> {
     let mut used_ids = BTreeSet::new();
     for page in &mut pages {
-        page.page_id = unique_page_id(&page.title, &page.path, &mut used_ids);
+        let identifier = page
+            .snapshot_id
+            .clone()
+            .or_else(|| snapshot_hint_name(page, &config.snapshot))
+            .unwrap_or_else(|| page.title.clone());
+        page.page_id = unique_page_id(&identifier, &page.path, &mut used_ids);
     }
     pages
 }
@@ -221,6 +875,18 @@ fn merge_scanned_page(into: &mut ScannedPage, from: ScannedPage) {
     }
     into.has_docs_index_candidate |= from.has_docs_index_candidate;
     into.opens.extend(from.opens);
+    if into.snapshot_id.is_none() {
+        into.snapshot_id = from.snapshot_id.clone();
+    }
+    if into.snapshot_url.is_none() {
+        into.snapshot_url = from.snapshot_url.clone();
+    }
+    if into.snapshot_actions.is_empty() {
+        into.snapshot_actions = from.snapshot_actions.clone();
+    }
+    if into.state_hints.is_empty() {
+        into.state_hints = from.state_hints.clone();
+    }
 
     let mut dialogs_by_id = into
         .dialogs
@@ -239,7 +905,15 @@ fn merge_scanned_page(into: &mut ScannedPage, from: ScannedPage) {
     nav_candidates.append(&mut into.nav_candidates);
     nav_candidates.extend(from.nav_candidates);
     into.nav_candidates = dedupe_nav_candidates(nav_candidates);
+
+    if into.controls.is_empty() {
+        into.controls = from.controls.clone();
+    }
+    if into.steppers.is_empty() {
+        into.steppers = from.steppers.clone();
+    }
 }
+
 
 fn dedupe_nav_candidates(candidates: Vec<NavCandidate>) -> Vec<NavCandidate> {
     let mut merged = BTreeMap::<BTreeSet<String>, NavCandidate>::new();
@@ -320,7 +994,7 @@ pub fn render_document(doc: &Document) -> String {
     out
 }
 
-fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
+fn document_from_scanned_pages(pages: &[ScannedPage], config: &ScanConfig) -> Document {
     let mut used_ids = pages
         .iter()
         .map(|page| page.page_id.clone())
@@ -345,6 +1019,12 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
                         has_docs_index_candidate: false,
                         dialogs: Vec::new(),
                         opens: BTreeSet::new(),
+                        controls: Vec::new(),
+                        steppers: Vec::new(),
+                        snapshot_id: None,
+                        snapshot_url: None,
+                        snapshot_actions: Vec::new(),
+                        state_hints: BTreeMap::new(),
                     }
                 });
             }
@@ -402,7 +1082,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     }
 
     let layout_groups = infer_layout_groups(&scanned_pages, &nav, &root_nav_ids);
-    let drill = build_drill_section(&scanned_pages);
+    let drill = build_drill_section_with_config(&scanned_pages, config);
     let section_page_ids = collect_section_page_ids(&drill);
     let layout_open_ids = infer_layout_dialogs(pages, &layout_groups, &input_page_ids);
     let layout_promoted_open_ids = layout_open_ids
@@ -487,10 +1167,21 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         if !filtered_opens.is_empty() {
             attrs.insert("opens".to_string(), AttrValue::Vector(filtered_opens));
         }
+        insert_snapshot_attrs(&mut attrs, page);
         node.insert(page.page_id.clone(), NodeSpec { attrs });
     }
 
     for page in &scanned_pages {
+        for (step_id, step_label, is_active) in page_stepper_nodes(page) {
+            let mut attrs = BTreeMap::new();
+            attrs.insert("kind".to_string(), AttrValue::Scalar("flow-step".to_string()));
+            attrs.insert("title".to_string(), AttrValue::Scalar(step_label));
+            attrs.insert(
+                "active".to_string(),
+                AttrValue::Scalar(if is_active { "true" } else { "false" }.to_string()),
+            );
+            node.insert(step_id, NodeSpec { attrs });
+        }
         for dialog in &page.dialogs {
             let mut attrs = BTreeMap::new();
             attrs.insert("kind".to_string(), AttrValue::Scalar("dialog".to_string()));
@@ -513,6 +1204,49 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         node,
         groups: Vec::new(),
     }
+}
+
+fn insert_snapshot_attrs(attrs: &mut BTreeMap<String, AttrValue>, page: &ScannedPage) {
+    if let Some(snapshot_id) = &page.snapshot_id {
+        attrs.insert(
+            "snapshot-id".to_string(),
+            AttrValue::Scalar(snapshot_id.clone()),
+        );
+    }
+    if let Some(snapshot_url) = &page.snapshot_url {
+        attrs.insert(
+            "snapshot-url".to_string(),
+            AttrValue::Scalar(snapshot_url.clone()),
+        );
+    }
+    if !page.snapshot_actions.is_empty() {
+        attrs.insert(
+            "snapshot-actions".to_string(),
+            AttrValue::Vector(page.snapshot_actions.iter().cloned().collect()),
+        );
+        attrs.insert(
+            "snapshot-flow".to_string(),
+            AttrValue::Scalar(page.snapshot_actions.join(" -> ")),
+        );
+    }
+    for (key, value) in &page.state_hints {
+        let attr_name = format!("snapshot-{}", sanitize_attr_key(key));
+        attrs.insert(attr_name, AttrValue::Scalar(value.clone()));
+    }
+}
+
+fn sanitize_attr_key(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    sanitized.trim_matches('-').to_string()
 }
 
 fn extract_title(html: &Html) -> Option<String> {
@@ -584,12 +1318,215 @@ fn infer_page_path(path: &Path) -> String {
     }
 }
 
+fn extract_steppers(html: &Html, config: &ScanConfig) -> Vec<ScannedStepper> {
+    let mut steppers = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    let label_selectors = config
+        .stepper
+        .label_selectors
+        .iter()
+        .filter_map(|selector_text| Selector::parse(selector_text).ok())
+        .collect::<Vec<_>>();
+
+    for selector_text in &config.stepper.indicator_selectors {
+        let Ok(indicator_selector) = Selector::parse(selector_text) else {
+            continue;
+        };
+        let mut indicator_labels = Vec::new();
+        let mut indicator_active = None;
+        for indicator in html.select(&indicator_selector) {
+            let label = indicator
+                .parent()
+                .and_then(scraper::ElementRef::wrap)
+                .and_then(|parent| extract_stepper_label_from_parent(&parent, &label_selectors, config));
+            let Some(label) = label else {
+                continue;
+            };
+            if is_active_stepper_indicator(&indicator, config) {
+                indicator_active = Some(label.clone());
+            }
+            if indicator_labels.last() != Some(&label) && !indicator_labels.contains(&label) {
+                indicator_labels.push(label);
+            }
+        }
+        push_stepper_candidate(&mut steppers, &mut seen, indicator_labels, indicator_active);
+    }
+
+    let item_selector = Selector::parse("button, [role='tab'], [role='button'], span, div").expect("stepper item selector");
+    for selector_text in &config.stepper.container_selectors {
+        let Ok(selector) = Selector::parse(selector_text) else {
+            continue;
+        };
+        for container in html.select(&selector) {
+            let mut labels = Vec::new();
+            let mut active_label = None;
+            for item in container.select(&item_selector) {
+                let label = collapse_text(item.text().collect::<String>());
+                if !looks_like_stepper_label(&label, &config.stepper) {
+                    continue;
+                }
+                if is_active_stepper_indicator(&item, config) {
+                    active_label = Some(label.clone());
+                }
+                if labels.last() != Some(&label) && !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            push_stepper_candidate(&mut steppers, &mut seen, labels, active_label);
+        }
+    }
+    steppers
+}
+
+fn extract_stepper_label_from_parent(
+    parent: &scraper::ElementRef<'_>,
+    label_selectors: &[Selector],
+    config: &ScanConfig,
+) -> Option<String> {
+    for selector in label_selectors {
+        for node in parent.select(selector) {
+            let text = collapse_text(node.text().collect::<String>());
+            if looks_like_stepper_label(&text, &config.stepper) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn is_active_stepper_indicator(element: &scraper::ElementRef<'_>, config: &ScanConfig) -> bool {
+    if matches!(element.value().attr("aria-selected"), Some("true"))
+        || matches!(element.value().attr("data-state"), Some("active") | Some("open"))
+    {
+        return true;
+    }
+    let class_name = element.value().attr("class").unwrap_or_default();
+    config
+        .stepper
+        .active_class_contains
+        .iter()
+        .any(|needle| class_name.contains(needle))
+}
+
+fn push_stepper_candidate(
+    steppers: &mut Vec<ScannedStepper>,
+    seen: &mut BTreeSet<String>,
+    labels: Vec<String>,
+    active_label: Option<String>,
+) {
+    if labels.len() < 2 {
+        return;
+    }
+    let fingerprint = format!("{}|{}", labels.join("|"), active_label.clone().unwrap_or_default());
+    if !seen.insert(fingerprint) {
+        return;
+    }
+    steppers.push(ScannedStepper { labels, active_label });
+}
+
+fn looks_like_stepper_label(label: &str, config: &StepperScanConfig) -> bool {
+    let compact = collapse_text(label.to_string());
+    if compact.is_empty() || compact.len() > config.max_label_len {
+        return false;
+    }
+    if compact.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let word_count = compact.split_whitespace().count();
+    if word_count > config.max_word_count {
+        return false;
+    }
+    let has_alpha_numeric = compact.chars().any(|ch| ch.is_alphanumeric());
+    let punctuation_like = compact
+        .chars()
+        .all(|ch| ch.is_ascii_punctuation() || ch.is_whitespace());
+    has_alpha_numeric && !punctuation_like
+}
+
+fn extract_controls(html: &Html) -> Vec<ScannedControl> {
+    let selector = Selector::parse(
+        "button, [role='button'], [role='tab'], [role='switch'], input[type='button'], input[type='submit']",
+    )
+    .expect("control selector");
+    let mut controls = Vec::new();
+    let mut seen = BTreeSet::new();
+    for element in html.select(&selector) {
+        let Some(label) = extract_control_label(&element) else {
+            continue;
+        };
+        let kind = classify_control_kind(&element);
+        let active = matches!(element.value().attr("data-state"), Some("active") | Some("open"));
+        let selected = matches!(element.value().attr("aria-selected"), Some("true"));
+        let expanded = matches!(element.value().attr("aria-expanded"), Some("true"));
+        let disabled = element.value().attr("disabled").is_some()
+            || matches!(element.value().attr("aria-disabled"), Some("true"));
+        let checked = element.value().attr("checked").is_some()
+            || matches!(element.value().attr("aria-checked"), Some("true"));
+        let fingerprint = format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            kind, label, active, selected, expanded, disabled, checked
+        );
+        if !seen.insert(fingerprint) {
+            continue;
+        }
+        controls.push(ScannedControl {
+            kind,
+            label,
+            active,
+            selected,
+            expanded,
+            disabled,
+            checked,
+        });
+    }
+    controls
+}
+
+fn extract_control_label(element: &scraper::ElementRef<'_>) -> Option<String> {
+    for attr in ["aria-label", "title", "value"] {
+        if let Some(value) = element.value().attr(attr) {
+            let value = collapse_text(value.to_string());
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    let text = collapse_text(element.text().collect::<String>());
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn classify_control_kind(element: &scraper::ElementRef<'_>) -> String {
+    let tag = element.value().name();
+    let role = element.value().attr("role").unwrap_or_default();
+    if role.eq_ignore_ascii_case("tab") {
+        return "tab".to_string();
+    }
+    if role.eq_ignore_ascii_case("switch") {
+        return "switch".to_string();
+    }
+    if tag.eq_ignore_ascii_case("input") {
+        if matches!(element.value().attr("type"), Some("submit")) {
+            return "submit".to_string();
+        }
+    }
+    "button".to_string()
+}
+
 fn extract_nav_candidates(
     html: &Html,
     page_host: Option<&str>,
     page_path: &str,
 ) -> Vec<NavCandidate> {
     let selectors = [
+        "aside",
+        "[role='complementary']",
+        "[class*='sidebar']",
+        "[data-sidebar]",
         "nav",
         "[role='navigation']",
         "[role='tablist']",
@@ -633,6 +1570,7 @@ fn extract_nav_candidates(
             let candidate = NavCandidate {
                 label: extract_container_label(&container),
                 targets: targets.into_values().collect(),
+                score: score_nav_candidate(&container, &meta),
             };
             if !candidate.targets.is_empty()
                 && !should_skip_nav_candidate(&candidate, &meta, page_path)
@@ -642,16 +1580,21 @@ fn extract_nav_candidates(
         }
     }
     candidates.sort_by(|left, right| {
-        left.targets
-            .iter()
-            .map(|target| target.path.as_str())
-            .collect::<Vec<_>>()
-            .cmp(
-                &right
-                    .targets
+        right
+            .score
+            .cmp(&left.score)
+            .then(
+                left.targets
                     .iter()
                     .map(|target| target.path.as_str())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .cmp(
+                        &right
+                            .targets
+                            .iter()
+                            .map(|target| target.path.as_str())
+                            .collect::<Vec<_>>(),
+                    ),
             )
     });
     candidates.dedup_by(|left, right| {
@@ -727,6 +1670,39 @@ fn normalize_relative_href_to_path(href: &str) -> Option<String> {
     } else {
         normalize_logical_page_path(&format!("/{path}"))
     })
+}
+
+fn score_nav_candidate(element: &scraper::ElementRef<'_>, meta: &NavCandidateMeta) -> i32 {
+    let mut score = match meta.selector.as_str() {
+        "aside" | "[role='complementary']" | "[class*='sidebar']" | "[data-sidebar]" => 120,
+        "nav" | "[role='navigation']" => 90,
+        "[role='tablist']" => 80,
+        "header" => 40,
+        "footer" => -40,
+        _ => 0,
+    };
+    if let Some(label) = element.value().attr("aria-label") {
+        let lowered = label.to_ascii_lowercase();
+        if lowered.contains("main") || lowered.contains("global") {
+            score += 30;
+        }
+        if lowered.contains("footer") {
+            score -= 40;
+        }
+        if lowered.contains("side") {
+            score += 25;
+        }
+    }
+    if let Some(class_name) = element.value().attr("class") {
+        let lowered = class_name.to_ascii_lowercase();
+        if lowered.contains("sidebar") {
+            score += 35;
+        }
+        if lowered.contains("footer") {
+            score -= 30;
+        }
+    }
+    score
 }
 
 fn extract_container_label(element: &scraper::ElementRef<'_>) -> Option<String> {
@@ -987,6 +1963,7 @@ fn has_large_docs_index_candidate(html: &Html, page_host: Option<&str>, page_pat
             let candidate = NavCandidate {
                 label: extract_container_label(&container),
                 targets: targets.into_values().collect(),
+                score: score_nav_candidate(&container, &NavCandidateMeta { selector: selector_text.to_string() }),
             };
             if is_docs_index_candidate(&candidate, page_path) {
                 return true;
@@ -1502,6 +2479,10 @@ fn infer_layout_id_for_segment(segment: &str) -> String {
 }
 
 fn build_inherit_section(pages: &[ScannedPage], layout_groups: &[LayoutGroup]) -> TreeSection {
+    let page_by_id = pages
+        .iter()
+        .map(|page| (page.page_id.clone(), page))
+        .collect::<BTreeMap<_, _>>();
     let mut claimed_pages = BTreeSet::new();
     let mut children = Vec::new();
 
@@ -1509,10 +2490,11 @@ fn build_inherit_section(pages: &[ScannedPage], layout_groups: &[LayoutGroup]) -
         let mut members = group.members.iter().cloned().collect::<Vec<_>>();
         members.sort();
         claimed_pages.extend(members.iter().cloned());
-        children.push(TreeChild::Branch(
-            group.layout_id.clone(),
-            members.into_iter().map(TreeChild::Leaf).collect(),
-        ));
+        let member_nodes = members
+            .into_iter()
+            .map(|page_id| inherit_page_child(&page_id, &page_by_id))
+            .collect();
+        children.push(TreeChild::Branch(group.layout_id.clone(), member_nodes));
     }
 
     let mut root_pages = pages
@@ -1521,9 +2503,26 @@ fn build_inherit_section(pages: &[ScannedPage], layout_groups: &[LayoutGroup]) -
         .filter(|page_id| !claimed_pages.contains(page_id))
         .collect::<Vec<_>>();
     root_pages.sort();
-    children.extend(root_pages.into_iter().map(TreeChild::Leaf));
+    children.extend(
+        root_pages
+            .into_iter()
+            .map(|page_id| inherit_page_child(&page_id, &page_by_id)),
+    );
 
     BTreeMap::from([("RootLayout".to_string(), children)])
+}
+
+fn inherit_page_child(page_id: &str, page_by_id: &BTreeMap<String, &ScannedPage>) -> TreeChild {
+    let Some(page) = page_by_id.get(page_id) else {
+        return TreeChild::Leaf(page_id.to_string());
+    };
+    let stepper_nodes = page_stepper_nodes(page);
+    let nested = build_stepper_tree(&stepper_nodes);
+    if nested.is_empty() {
+        TreeChild::Leaf(page_id.to_string())
+    } else {
+        TreeChild::Branch(page_id.to_string(), nested)
+    }
 }
 
 fn normalize_path(path: &str) -> String {
@@ -1566,20 +2565,31 @@ fn make_identifier(input: &str, fallback: &str) -> String {
     }
 }
 
+
+#[cfg(test)]
 fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
+    build_drill_section_with_config(pages, &ScanConfig::default())
+}
+
+fn build_drill_section_with_config(pages: &[ScannedPage], config: &ScanConfig) -> TreeSection {
     let page_id_by_path = pages
         .iter()
         .map(|page| (page.path.clone(), page.page_id.clone()))
         .collect::<BTreeMap<_, _>>();
+    let snapshot_parent_by_id = infer_snapshot_drill_parents(pages, &page_id_by_path, config);
     let mut parent_by_id = BTreeMap::<String, Option<String>>::new();
     for page in pages {
-        let segments = split_path_segments(&page.path);
-        let parent = infer_drill_parent(
-            &page.path,
-            &segments,
-            &page.breadcrumb_paths,
-            &page_id_by_path,
-        )
+        let parent = if let Some(snapshot_parent) = snapshot_parent_by_id.get(&page.page_id) {
+            Some(snapshot_parent.clone())
+        } else {
+            let segments = split_path_segments(&page.path);
+            infer_drill_parent(
+                &page.path,
+                &segments,
+                &page.breadcrumb_paths,
+                &page_id_by_path,
+            )
+        }
         .filter(|parent_id| parent_id != &page.page_id);
         parent_by_id.insert(page.page_id.clone(), parent);
     }
@@ -1613,6 +2623,113 @@ fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
         );
     }
     section
+}
+
+fn infer_snapshot_drill_parents(
+    pages: &[ScannedPage],
+    page_id_by_path: &BTreeMap<String, String>,
+    config: &ScanConfig,
+) -> BTreeMap<String, String> {
+    let mut groups = BTreeMap::<(String, String), Vec<&ScannedPage>>::new();
+    for page in pages {
+        let Some(snapshot_url) = &page.snapshot_url else {
+            continue;
+        };
+        if &page.path == snapshot_url {
+            continue;
+        }
+        let flow_key = snapshot_flow_key(page, &config.snapshot);
+        groups
+            .entry((snapshot_url.clone(), flow_key))
+            .or_default()
+            .push(page);
+    }
+
+    let mut parents = BTreeMap::new();
+    for ((snapshot_url, _flow_key), mut group_pages) in groups {
+        group_pages.sort_by(|left, right| {
+            snapshot_step_rank(left)
+                .cmp(&snapshot_step_rank(right))
+                .then(snapshot_step_name(left, &config.snapshot).cmp(&snapshot_step_name(right, &config.snapshot)))
+                .then(left.path.cmp(&right.path))
+                .then(left.snapshot_id.cmp(&right.snapshot_id))
+        });
+        let mut previous_parent = page_id_by_path.get(&snapshot_url).cloned();
+        for page in group_pages {
+            if let Some(parent_id) = &previous_parent {
+                parents.insert(page.page_id.clone(), parent_id.clone());
+            }
+            previous_parent = Some(page.page_id.clone());
+        }
+    }
+    parents
+}
+
+fn snapshot_flow_key(page: &ScannedPage, config: &SnapshotScanConfig) -> String {
+    config
+        .flow_hint_keys
+        .iter()
+        .filter_map(|key| page.state_hints.get(key).map(|value| format!("{key}={value}")))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn snapshot_hint_name(page: &ScannedPage, config: &SnapshotScanConfig) -> Option<String> {
+    config
+        .step_hint_keys
+        .iter()
+        .find_map(|key| page.state_hints.get(key).cloned())
+}
+
+fn snapshot_step_rank(page: &ScannedPage) -> usize {
+    page.steppers
+        .first()
+        .and_then(|stepper| {
+            stepper
+                .active_label
+                .as_ref()
+                .and_then(|active| stepper.labels.iter().position(|label| label == active))
+        })
+        .unwrap_or(usize::MAX)
+}
+
+fn snapshot_step_name(page: &ScannedPage, config: &SnapshotScanConfig) -> String {
+    page.steppers
+        .first()
+        .and_then(|stepper| stepper.active_label.clone())
+        .or_else(|| snapshot_hint_name(page, config))
+        .unwrap_or_default()
+}
+
+fn page_stepper_nodes(page: &ScannedPage) -> Vec<(String, String, bool)> {
+    let Some(stepper) = page.steppers.first() else {
+        return Vec::new();
+    };
+    stepper
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            (
+                format!("{}Step{}", page.page_id, index + 1),
+                label.clone(),
+                stepper.active_label.as_ref() == Some(label),
+            )
+        })
+        .collect()
+}
+
+fn build_stepper_tree(children: &[(String, String, bool)]) -> Vec<TreeChild> {
+    if let Some((first_id, _, _)) = children.first() {
+        let nested = build_stepper_tree(&children[1..]);
+        if nested.is_empty() {
+            vec![TreeChild::Leaf(first_id.clone())]
+        } else {
+            vec![TreeChild::Branch(first_id.clone(), nested)]
+        }
+    } else {
+        Vec::new()
+    }
 }
 
 fn infer_drill_parent(
@@ -1664,19 +2781,22 @@ fn build_drill_children(
     children_by_parent: &BTreeMap<String, Vec<String>>,
     pages_by_id: &BTreeMap<String, &ScannedPage>,
 ) -> Vec<TreeChild> {
+    let mut out = Vec::new();
     let mut children = children_by_parent.get(page_id).cloned().unwrap_or_default();
     children.sort_by_key(|child| pages_by_id.get(child).map(|page| page.path.clone()));
-    children
-        .into_iter()
-        .map(|child| {
-            let nested = build_drill_children(&child, children_by_parent, pages_by_id);
-            if nested.is_empty() {
-                TreeChild::Leaf(child)
-            } else {
-                TreeChild::Branch(child, nested)
-            }
-        })
-        .collect()
+    for child in children {
+        let nested = build_drill_children(&child, children_by_parent, pages_by_id);
+        if nested.is_empty() {
+            out.push(TreeChild::Leaf(child));
+        } else {
+            out.push(TreeChild::Branch(child, nested));
+        }
+    }
+    if let Some(page) = pages_by_id.get(page_id) {
+        let stepper_nodes = page_stepper_nodes(page);
+        out.extend(build_stepper_tree(&stepper_nodes));
+    }
+    out
 }
 
 fn collect_section_page_ids(section: &TreeSection) -> BTreeSet<String> {
@@ -2389,9 +3509,10 @@ mod tests {
     use super::{
         build_drill_section, infer_layout_groups, infer_page_path, load_document_from_path,
         load_documents_from_paths, normalize_logical_page_path, normalize_scanned_pages,
-        parse_document, prune_redundant_nav_clusters, render_document, scan_html_paths,
-        validate_document, AttrValue, NavCandidate, NavCluster, ScannedPage, ScannedTarget,
-        TreeChild,
+        compare_scan_inputs_with_config, parse_document, prune_redundant_nav_clusters, render_compare_report,
+        render_document, render_scan_summary, scan_html_paths, scan_html_paths_with_stage,
+        validate_document, AttrValue, NavCandidate, NavCluster, ScanConfig, ScanStage, ScannedPage,
+        ScannedTarget, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -2623,6 +3744,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
+        controls: Vec::new(),
+        steppers: Vec::new(),
+        snapshot_id: None,
+        snapshot_url: None,
+        snapshot_actions: Vec::new(),
+        state_hints: BTreeMap::new(),
         };
         let docs = ScannedPage {
             page_id: "Docs".to_string(),
@@ -2633,6 +3760,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
+        controls: Vec::new(),
+        steppers: Vec::new(),
+        snapshot_id: None,
+        snapshot_url: None,
+        snapshot_actions: Vec::new(),
+        state_hints: BTreeMap::new(),
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -2643,6 +3776,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
+        controls: Vec::new(),
+        steppers: Vec::new(),
+        snapshot_id: None,
+        snapshot_url: None,
+        snapshot_actions: Vec::new(),
+        state_hints: BTreeMap::new(),
         };
         let advanced = ScannedPage {
             page_id: "Advanced".to_string(),
@@ -2653,6 +3792,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
+        controls: Vec::new(),
+        steppers: Vec::new(),
+        snapshot_id: None,
+        snapshot_url: None,
+        snapshot_actions: Vec::new(),
+        state_hints: BTreeMap::new(),
         };
 
         let drill = build_drill_section(&[home, docs, guide, advanced]);
@@ -2764,6 +3909,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
+        controls: Vec::new(),
+        steppers: Vec::new(),
+        snapshot_id: None,
+        snapshot_url: None,
+        snapshot_actions: Vec::new(),
+        state_hints: BTreeMap::new(),
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -2774,6 +3925,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
+        controls: Vec::new(),
+        steppers: Vec::new(),
+        snapshot_id: None,
+        snapshot_url: None,
+        snapshot_actions: Vec::new(),
+        state_hints: BTreeMap::new(),
         };
         let faq = ScannedPage {
             page_id: "Faq".to_string(),
@@ -2788,6 +3945,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
+        controls: Vec::new(),
+        steppers: Vec::new(),
+        snapshot_id: None,
+        snapshot_url: None,
+        snapshot_actions: Vec::new(),
+        state_hints: BTreeMap::new(),
         };
 
         let drill = build_drill_section(&[root, guide, faq]);
@@ -2810,6 +3973,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
             },
             ScannedPage {
                 page_id: "My".to_string(),
@@ -2820,6 +3989,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
             },
             ScannedPage {
                 page_id: "MyOrders".to_string(),
@@ -2830,6 +4005,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
             },
         ];
         let nav = BTreeMap::from([
@@ -3138,6 +4319,7 @@ node:
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: vec![NavCandidate {
                     label: Some("global".to_string()),
+                    score: 0,
                     targets: vec![
                         ScannedTarget {
                             path: "/".to_string(),
@@ -3152,6 +4334,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
             },
             ScannedPage {
                 page_id: String::new(),
@@ -3162,6 +4350,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::from(["WelcomeDialog".to_string()]),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
             },
         ]);
 
@@ -3173,6 +4367,171 @@ node:
             BTreeSet::from(["WelcomeDialog".to_string()])
         );
         assert_eq!(merged[0].nav_candidates.len(), 1);
+    }
+
+    #[test]
+    fn compare_scan_inputs_reports_dialog_and_hint_mismatch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-compare-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left_html = dir.join("left.html");
+        let right_html = dir.join("right.html");
+        let left_manifest = dir.join("left.snapshot.yaml");
+        let right_manifest = dir.join("right.snapshot.yaml");
+        fs::write(
+            &left_html,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>PIR</title>
+    <link rel="canonical" href="https://example.test/client-admin/pir-management" />
+  </head>
+  <body>
+    <button>PIR設定を変更</button>
+    <div class="wizard-header">
+      <div><div data-testid="step-indicator-about" class="bg-primary text-primary-foreground"></div><span>PIRとは</span></div>
+      <div><div data-testid="step-indicator-pirType" class="bg-muted text-muted-foreground"></div><span>PIR種類</span></div>
+    </div>
+    <dialog id="pir-wizard" aria-label="PIR設定ウィザード"></dialog>
+  </body>
+</html>"#,
+        )
+        .expect("write left html");
+        fs::write(
+            &right_html,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>PIR</title>
+    <link rel="canonical" href="https://example.test/client-admin/pir-management" />
+  </head>
+  <body>
+    <button>ブリーフィング通知設定</button>
+    <div class="wizard-header">
+      <div><div data-testid="step-indicator-about" class="bg-muted text-muted-foreground"></div><span>PIRとは</span></div>
+      <div><div data-testid="step-indicator-pirType" class="bg-primary text-primary-foreground"></div><span>PIR種類</span></div>
+    </div>
+  </body>
+</html>"#,
+        )
+        .expect("write right html");
+        fs::write(
+            &left_manifest,
+            r#"snapshot:
+  id: pir-state
+  url: /client-admin/pir-management
+  html: left.html
+  stateHints:
+    wizard-step: about
+"#,
+        )
+        .expect("write left manifest");
+        fs::write(
+            &right_manifest,
+            r#"snapshot:
+  id: pir-state
+  url: /client-admin/pir-management
+  html: right.html
+  stateHints:
+    wizard-step: type
+"#,
+        )
+        .expect("write right manifest");
+
+        let mut config = ScanConfig::default();
+        config.stepper.indicator_selectors = vec!["[data-testid^='step-indicator-']".to_string()];
+        config.stepper.active_class_contains = vec!["bg-primary".to_string(), "text-primary-foreground".to_string()];
+        let report = compare_scan_inputs_with_config(&left_manifest, &right_manifest, &config).expect("compare");
+        let rendered = render_compare_report(&report);
+        assert!(rendered.contains("[missing-dialog]"));
+        assert!(rendered.contains("[missing-control]"));
+        assert!(rendered.contains("[state-hint-mismatch]"));
+        assert!(rendered.contains("[stepper-mismatch]"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scan_manifest_annotates_snapshot_and_emits_summary_controls() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-manifest-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let html = dir.join("pir.html");
+        let manifest = dir.join("pir.snapshot.yaml");
+        fs::write(
+            &html,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>PIR</title>
+    <link rel="canonical" href="https://example.test/client-admin/pir-management" />
+  </head>
+  <body>
+    <button>PIR設定を変更</button>
+    <div role="tablist">
+      <button role="tab" aria-selected="true">PIR種類</button>
+    </div>
+    <dialog id="pir-wizard" aria-label="PIR設定ウィザード">
+      <button>次へ</button>
+    </dialog>
+  </body>
+</html>"#,
+        )
+        .expect("write html");
+        fs::write(
+            &manifest,
+            r#"snapshot:
+  id: pir-wizard-type
+  url: /client-admin/pir-management
+  html: pir.html
+  actions:
+    - click: PIR設定を変更
+    - click: 次へ
+  stateHints:
+    modal: pir-wizard
+    wizard-step: pir-type
+"#,
+        )
+        .expect("write manifest");
+
+        let result = scan_html_paths_with_stage([&manifest], ScanStage::Summary).expect("scan");
+        validate_document(&result.document).expect("validate");
+
+        let page = result
+            .document
+            .node
+            .values()
+            .find(|spec| {
+                matches!(
+                    spec.attrs.get("snapshot-id"),
+                    Some(AttrValue::Scalar(value)) if value == "pir-wizard-type"
+                )
+            })
+            .expect("snapshot page");
+        let snapshot_id = match page.attrs.get("snapshot-id") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        let wizard_step = match page.attrs.get("snapshot-wizard-step") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        assert_eq!(snapshot_id, "pir-wizard-type");
+        assert_eq!(wizard_step, "pir-type");
+
+        let summary = render_scan_summary(&result.summary);
+        assert!(summary.contains("snapshot_id: pir-wizard-type"));
+        assert!(summary.contains("label: PIR設定を変更"));
+        assert!(summary.contains("label: PIR種類"));
+        assert!(summary.contains("title: PIR設定ウィザード"));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
