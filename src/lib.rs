@@ -1,4 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde_yaml::{Mapping, Value};
 
@@ -48,6 +52,11 @@ impl ValidationError {
             message: message.into(),
         }
     }
+}
+
+pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
+    let mut stack = Vec::new();
+    load_document_from_path_inner(path.as_ref(), &mut stack)
 }
 
 pub fn parse_document(input: &str) -> Result<Document, ValidationError> {
@@ -145,11 +154,158 @@ pub fn page_nodes(doc: &Document) -> Result<BTreeSet<String>, Vec<ValidationErro
     }
 }
 
+fn load_document_from_path_inner(
+    path: &Path,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Document, ValidationError> {
+    let canonical = path.canonicalize().map_err(|err| {
+        ValidationError::new(format!("failed to open `{}`: {err}", path.display()))
+    })?;
+    if stack.contains(&canonical) {
+        let mut chain = stack
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>();
+        chain.push(canonical.display().to_string());
+        return Err(ValidationError::new(format!(
+            "import cycle detected: {}",
+            chain.join(" -> ")
+        )));
+    }
+    stack.push(canonical.clone());
+
+    let input = fs::read_to_string(&canonical).map_err(|err| {
+        ValidationError::new(format!("failed to read `{}`: {err}", canonical.display()))
+    })?;
+
+    let (imports, body) = preprocess_source(&input).map_err(|err| {
+        ValidationError::new(format!("{} in `{}`", err.message, canonical.display()))
+    })?;
+
+    let mut doc = Document {
+        app: None,
+        drill: BTreeMap::new(),
+        inherit: BTreeMap::new(),
+        nav: BTreeMap::new(),
+        node: BTreeMap::new(),
+        groups: Vec::new(),
+    };
+
+    let base_dir = canonical.parent().unwrap_or_else(|| Path::new("."));
+    for import in imports {
+        let import_path = base_dir.join(import);
+        let imported = load_document_from_path_inner(&import_path, stack)?;
+        merge_document(&mut doc, imported);
+    }
+
+    let current = parse_document(&body)?;
+    merge_document(&mut doc, current);
+    stack.pop();
+    Ok(doc)
+}
+
 fn optional_string(root: &Mapping, key: &str) -> Result<Option<String>, ValidationError> {
     match root.get(Value::String(key.to_string())) {
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(ValidationError::new(format!("`{key}` must be a string"))),
         None => Ok(None),
+    }
+}
+
+fn preprocess_source(input: &str) -> Result<(Vec<String>, String), ValidationError> {
+    let mut imports = Vec::new();
+    let mut body = String::new();
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#import") {
+            let rest = trimmed.trim_start_matches("#import").trim();
+            let Some(path) = parse_import_target(rest) else {
+                return Err(ValidationError::new(
+                    "invalid #import syntax; expected #import \"path.gui\"",
+                ));
+            };
+            imports.push(path);
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    Ok((imports, body))
+}
+
+fn parse_import_target(rest: &str) -> Option<String> {
+    let mut chars = rest.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+    let mut out = String::new();
+    for ch in chars {
+        if ch == '"' {
+            return Some(out);
+        }
+        out.push(ch);
+    }
+    None
+}
+
+fn merge_document(into: &mut Document, other: Document) {
+    if other.app.is_some() {
+        into.app = other.app;
+    }
+    merge_tree_section(&mut into.drill, other.drill);
+    merge_tree_section(&mut into.inherit, other.inherit);
+    merge_nav_section(&mut into.nav, other.nav);
+    merge_node_section(&mut into.node, other.node);
+    merge_groups(&mut into.groups, other.groups);
+}
+
+fn merge_tree_section(into: &mut TreeSection, other: TreeSection) {
+    for (key, value) in other {
+        into.entry(key).or_default().extend(value);
+    }
+}
+
+fn merge_nav_section(
+    into: &mut BTreeMap<String, BTreeSet<String>>,
+    other: BTreeMap<String, BTreeSet<String>>,
+) {
+    for (key, value) in other {
+        into.entry(key).or_default().extend(value);
+    }
+}
+
+fn merge_node_section(into: &mut BTreeMap<String, NodeSpec>, other: BTreeMap<String, NodeSpec>) {
+    for (node_id, spec) in other {
+        let entry = into.entry(node_id).or_default();
+        for (attr_name, attr_value) in spec.attrs {
+            match (entry.attrs.get_mut(&attr_name), attr_value) {
+                (Some(AttrValue::Vector(existing)), AttrValue::Vector(next)) => {
+                    existing.extend(next);
+                }
+                (_, next) => {
+                    entry.attrs.insert(attr_name, next);
+                }
+            }
+        }
+    }
+}
+
+fn merge_groups(into: &mut Vec<GroupSpec>, other: Vec<GroupSpec>) {
+    let mut index = into
+        .iter()
+        .enumerate()
+        .map(|(idx, group)| (group.id.clone(), idx))
+        .collect::<BTreeMap<_, _>>();
+    for group in other {
+        if let Some(existing_idx) = index.get(&group.id).copied() {
+            into[existing_idx].members.extend(group.members);
+        } else {
+            index.insert(group.id.clone(), into.len());
+            into.push(group);
+        }
     }
 }
 
@@ -413,7 +569,12 @@ fn collect_nodes_children(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_document, validate_document};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{load_document_from_path, parse_document, validate_document};
 
     const DEMO: &str = include_str!("../examples/demo.gui");
 
@@ -442,5 +603,35 @@ node:
         let doc = parse_document(src).expect("parse");
         let errors = validate_document(&doc).expect_err("should fail");
         assert!(errors.iter().any(|err| err.message.contains("Ghost")));
+    }
+
+    #[test]
+    fn loads_imports_and_skips_hash_comments() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-import-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let imported = dir.join("base.gui");
+        let root = dir.join("root.gui");
+        fs::write(
+            &imported,
+            "# comment\nnav:\n  GlobalNav: [Home]\nnode:\n  RootLayout:\n    nav: [GlobalNav]\n",
+        )
+        .expect("write import");
+        fs::write(
+            &root,
+            format!(
+                "#import \"{}\"\n# comment\ndrill:\n  Home: []\ninherit:\n  RootLayout:\n    - Home\nnode:\n  Home:\n    path: /\n",
+                imported.file_name().expect("name").to_string_lossy()
+            ),
+        )
+        .expect("write root");
+
+        let doc = load_document_from_path(&root).expect("load");
+        validate_document(&doc).expect("validate");
+        assert!(doc.nav.contains_key("GlobalNav"));
+        assert!(doc.node.contains_key("RootLayout"));
     }
 }

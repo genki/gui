@@ -24,6 +24,15 @@ Attribute inheritance follows these rules:
 
 `nav` is a vector attribute and is unordered at the language level.
 
+Lines whose first non-space character is `#` are comments.
+`#import "path.gui"` imports another `.gui` file inline before parsing.
+Imported files are merged section-by-section:
+
+- `drill` and `inherit`: root entries are appended by key
+- `nav`: page-id sets are union-merged by nav id
+- `node`: scalar attrs override and vector attrs union-merge by node id
+- `groups`: groups with the same `id` union-merge their members
+
 The model intentionally does not require a top-level `transitions` section.
 Many practical transitions are derived from:
 
@@ -57,6 +66,8 @@ node:
 ## Rules
 
 - `node` is a map keyed by unique node id.
+- `#import "..."` is resolved relative to the importing file.
+- import cycles are invalid.
 - every `inherit` leaf is a page.
 - every node that appears in `drill` is a page.
 - a non-leaf `inherit` node is not necessarily a page.

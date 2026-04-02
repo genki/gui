@@ -20,6 +20,15 @@ The format treats `nav` as a first-class shared component.
 In this abstract language, `nav` is unordered. Concrete UI layers may choose an
 ordering or spatial arrangement such as tabs, side menus, or ring menus.
 
+Lines whose first non-space character is `#` are treated as comments.
+`#import "foo.gui"` inlines another `.gui` file before parsing. Imported files
+are merged by top-level section:
+
+- `drill` and `inherit`: root entries are merged
+- `nav`: target sets are union-merged by nav id
+- `node`: scalar attrs override, vector attrs union-merge by node id
+- `groups`: groups with the same `id` union-merge their members
+
 ## Example
 
 ```gui
@@ -82,6 +91,7 @@ foo:
 
 ```sh
 cargo run -- check examples/demo.gui
+cargo run -- check examples/demo.gui other.gui
 cargo run -- pages examples/demo.gui
 ```
 
