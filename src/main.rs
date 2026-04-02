@@ -4,7 +4,9 @@ use std::{
     process,
 };
 
-use gui::{load_documents_from_paths, page_nodes, validate_document};
+use gui::{
+    load_documents_from_paths, page_nodes, validate_document, Document, TreeChild, TreeSection,
+};
 
 fn main() {
     let mut args = env::args();
@@ -13,7 +15,10 @@ fn main() {
         print_usage(&program);
         process::exit(2);
     };
-    if command != "check" && command != "pages" {
+    if !matches!(
+        command.as_str(),
+        "check" | "page" | "drill" | "inherit" | "node" | "nav"
+    ) {
         eprintln!("unknown command: {command}");
         print_usage(&program);
         process::exit(2);
@@ -29,35 +34,11 @@ fn main() {
 
     match command.as_str() {
         "check" => {
-            let doc = match load_documents_from_paths(paths.iter()) {
-                Ok(doc) => doc,
-                Err(err) => {
-                    eprintln!("syntax error: {}", err.message);
-                    process::exit(1);
-                }
-            };
-            if let Err(errors) = validate_document(&doc) {
-                for err in errors {
-                    eprintln!("validation error: {}", err.message);
-                }
-                process::exit(1);
-            }
+            let _doc = load_and_validate(&paths);
             println!("ok");
         }
-        "pages" => {
-            let doc = match load_documents_from_paths(paths.iter()) {
-                Ok(doc) => doc,
-                Err(err) => {
-                    eprintln!("syntax error: {}", err.message);
-                    process::exit(1);
-                }
-            };
-            if let Err(errors) = validate_document(&doc) {
-                for err in errors {
-                    eprintln!("validation error: {}", err.message);
-                }
-                process::exit(1);
-            }
+        "page" => {
+            let doc = load_and_validate(&paths);
             match page_nodes(&doc) {
                 Ok(pages) => {
                     for page in pages {
@@ -72,13 +53,74 @@ fn main() {
                 }
             }
         }
+        "drill" => {
+            let doc = load_and_validate(&paths);
+            print_tree_section(&doc.drill);
+        }
+        "inherit" => {
+            let doc = load_and_validate(&paths);
+            print_tree_section(&doc.inherit);
+        }
+        "node" => {
+            let doc = load_and_validate(&paths);
+            for node_id in doc.node.keys() {
+                println!("{node_id}");
+            }
+        }
+        "nav" => {
+            let doc = load_and_validate(&paths);
+            for nav_id in doc.nav.keys() {
+                println!("{nav_id}");
+            }
+        }
         _ => unreachable!(),
     }
 }
 
 fn print_usage(program: &str) {
     eprintln!("usage: {program} check <file.gui> [more.gui ...]");
-    eprintln!("       {program} pages [file.gui ...]");
+    eprintln!("       {program} page [file.gui ...]");
+    eprintln!("       {program} drill [file.gui ...]");
+    eprintln!("       {program} inherit [file.gui ...]");
+    eprintln!("       {program} node [file.gui ...]");
+    eprintln!("       {program} nav [file.gui ...]");
+}
+
+fn load_and_validate(paths: &[PathBuf]) -> Document {
+    let doc = match load_documents_from_paths(paths.iter()) {
+        Ok(doc) => doc,
+        Err(err) => {
+            eprintln!("syntax error: {}", err.message);
+            process::exit(1);
+        }
+    };
+    if let Err(errors) = validate_document(&doc) {
+        for err in errors {
+            eprintln!("validation error: {}", err.message);
+        }
+        process::exit(1);
+    }
+    doc
+}
+
+fn print_tree_section(section: &TreeSection) {
+    for (root, children) in section {
+        println!("{root}");
+        print_tree_children(children, 1);
+    }
+}
+
+fn print_tree_children(children: &[TreeChild], depth: usize) {
+    for child in children {
+        let indent = "  ".repeat(depth);
+        match child {
+            TreeChild::Leaf(id) => println!("{indent}{id}"),
+            TreeChild::Branch(id, nested) => {
+                println!("{indent}{id}");
+                print_tree_children(nested, depth + 1);
+            }
+        }
+    }
 }
 
 fn resolve_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {

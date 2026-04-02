@@ -97,13 +97,23 @@ leaf は `Page:` のように null child で表現でき、loader/preparser は 
 cargo run -- check examples/demo.gui
 cargo run -- check examples/demo.gui other.gui
 cargo run -- check
-cargo run -- pages examples/demo.gui
-cargo run -- pages
+cargo run -- page examples/demo.gui
+cargo run -- page
+cargo run -- drill
+cargo run -- inherit
+cargo run -- node
+cargo run -- nav
 ```
 
 引数を省略した場合は、実行ディレクトリ配下を再帰走査して見つかったすべての
-`*.gui` を 1 つの入力集合として merge してから `check` / `pages` を実行します。
+`*.gui` を 1 つの入力集合として merge してから各コマンドを実行します。
 明示的に複数ファイルを渡した場合も同じく merge 後の和集合に対して実行します。
+
+- `page`: page 条件に合致する node 一覧
+- `drill`: `drill` 木を indent 付きで表示
+- `inherit`: `inherit` 木を indent 付きで表示
+- `node`: `node` セクションのキー一覧
+- `nav`: `nav` セクションのキー一覧
 
 ## Status
 
