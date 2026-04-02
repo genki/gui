@@ -421,10 +421,10 @@ fn extract_nav_candidates(html: &Html, page_host: Option<&str>) -> Vec<NavCandid
                 let Some(path) = normalize_internal_href_to_path(href, page_host) else {
                     continue;
                 };
-                if !is_probably_page_path(&path) {
+                let title = extract_link_title(&link, &path);
+                if !is_probably_page_target(&path, &title, &link) {
                     continue;
                 }
-                let title = extract_link_title(&link, &path);
                 targets
                     .entry(path.clone())
                     .or_insert(ScannedTarget { path, title });
@@ -564,6 +564,58 @@ fn infer_title_from_route(path: &str) -> String {
         .join(" ")
 }
 
+fn is_probably_page_target(path: &str, title: &str, link: &scraper::ElementRef<'_>) -> bool {
+    if !is_probably_page_path(path) {
+        return false;
+    }
+
+    let lowered_title = title.to_ascii_lowercase();
+    let action_labels = [
+        "login",
+        "log in",
+        "logout",
+        "log out",
+        "sign in",
+        "sign up",
+        "register",
+        "cart",
+        "checkout",
+        "purchase",
+        "buy now",
+        "add to cart",
+        "ログイン",
+        "ログアウト",
+        "会員登録",
+        "新規取得",
+        "カート",
+        "購入",
+        "注文する",
+    ];
+    if action_labels
+        .iter()
+        .any(|label| lowered_title.contains(&label.to_ascii_lowercase()))
+    {
+        return false;
+    }
+
+    let rel = link
+        .value()
+        .attr("rel")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if rel.contains("nofollow") {
+        let utility_labels = ["detail", "details", "詳", "取得", "応募", "claim"];
+        if utility_labels
+            .iter()
+            .any(|label| lowered_title.contains(&label.to_ascii_lowercase()))
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn is_probably_page_path(path: &str) -> bool {
     let lowered = path.to_ascii_lowercase();
     let blocked_fragments = [
@@ -577,6 +629,8 @@ fn is_probably_page_path(path: &str) -> bool {
         "/cart",
         "/checkout",
         "/purchase",
+        "/order/",
+        "/basket",
     ];
     if blocked_fragments
         .iter()
@@ -1814,5 +1868,43 @@ node:
         let docs_children = drill.get("Docs").expect("docs root");
         assert!(docs_children.contains(&TreeChild::Leaf("Guide".to_string())));
         assert!(docs_children.contains(&TreeChild::Leaf("Advanced".to_string())));
+    }
+
+    #[test]
+    fn scan_excludes_action_like_links_from_stub_pages() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-action-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("action-home.html");
+        fs::write(
+            &home,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Example Portal</title>
+    <link rel="canonical" href="https://portal.example.test/" />
+  </head>
+  <body>
+    <header>
+      <nav aria-label="main nav">
+        <a href="https://portal.example.test/">Home</a>
+        <a href="https://portal.example.test/docs">Docs</a>
+        <a href="https://portal.example.test/login" rel="nofollow">ログイン</a>
+        <a href="https://portal.example.test/cart" rel="nofollow">カート</a>
+      </nav>
+    </header>
+  </body>
+</html>"#,
+        )
+        .expect("write home");
+
+        let doc = scan_html_paths([&home]).expect("scan");
+        validate_document(&doc).expect("validate scan result");
+        assert!(doc.node.contains_key("Docs"));
+        assert!(!doc.node.contains_key("Login"));
+        assert!(!doc.node.contains_key("Cart"));
     }
 }
