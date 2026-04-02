@@ -59,6 +59,34 @@ pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, Valid
     load_document_from_path_inner(path.as_ref(), &mut stack)
 }
 
+pub fn load_documents_from_paths<I, P>(paths: I) -> Result<Document, ValidationError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut merged = Document {
+        app: None,
+        drill: BTreeMap::new(),
+        inherit: BTreeMap::new(),
+        nav: BTreeMap::new(),
+        node: BTreeMap::new(),
+        groups: Vec::new(),
+    };
+    let mut saw_any = false;
+
+    for path in paths {
+        saw_any = true;
+        let doc = load_document_from_path(path)?;
+        merge_document(&mut merged, doc);
+    }
+
+    if !saw_any {
+        return Err(ValidationError::new("no .gui files matched input"));
+    }
+
+    Ok(merged)
+}
+
 pub fn parse_document(input: &str) -> Result<Document, ValidationError> {
     let normalized = normalize_tree_shorthand(input);
     let root: Value = serde_yaml::from_str(&normalized)
@@ -637,7 +665,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{load_document_from_path, parse_document, validate_document};
+    use super::{
+        load_document_from_path, load_documents_from_paths, parse_document, validate_document,
+    };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
 
@@ -720,5 +750,32 @@ node:
 
         let doc = parse_document(src).expect("parse");
         validate_document(&doc).expect("validate");
+    }
+
+    #[test]
+    fn merges_multiple_documents() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-merge-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let a = dir.join("a.gui");
+        let b = dir.join("b.gui");
+        fs::write(
+            &a,
+            "drill:\n  Home:\ninherit:\n  RootLayout:\n    Home:\nnav:\n  GlobalNav: [Home]\n",
+        )
+        .expect("write a");
+        fs::write(
+            &b,
+            "drill:\n  AdminRoot:\ninherit:\n  AdminShell:\n    AdminRoot:\nnode:\n  RootLayout:\n    nav: [GlobalNav]\n",
+        )
+        .expect("write b");
+
+        let doc = load_documents_from_paths([&a, &b]).expect("load merged");
+        validate_document(&doc).expect("validate merged");
+        assert!(doc.drill.contains_key("Home"));
+        assert!(doc.drill.contains_key("AdminRoot"));
     }
 }

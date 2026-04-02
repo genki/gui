@@ -105,3 +105,10 @@ foo:
 - `drill` answers: what is this page drilling into?
 - `nav` answers: where can this shared navigator take the user?
 - ordering is intentionally outside the core language model.
+
+## CLI input resolution
+
+- `gui check` と `gui pages` は複数 `.gui` ファイルを受け取れる。
+- 複数ファイルは top-level section merge により 1 つの document として解釈する。
+- 引数が省略された場合は、実行ディレクトリ配下を再帰走査して見つかったすべての
+  `*.gui` を入力集合として用いる。

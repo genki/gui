@@ -96,8 +96,14 @@ leaf は `Page:` のように null child で表現でき、loader/preparser は 
 ```sh
 cargo run -- check examples/demo.gui
 cargo run -- check examples/demo.gui other.gui
+cargo run -- check
 cargo run -- pages examples/demo.gui
+cargo run -- pages
 ```
+
+引数を省略した場合は、実行ディレクトリ配下を再帰走査して見つかったすべての
+`*.gui` を 1 つの入力集合として merge してから `check` / `pages` を実行します。
+明示的に複数ファイルを渡した場合も同じく merge 後の和集合に対して実行します。
 
 ## Status
 
