@@ -1057,7 +1057,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     for page in &scanned_pages {
         for (step_id, step_label, is_active) in page_stepper_nodes(page) {
             let mut attrs = BTreeMap::new();
-            attrs.insert("kind".to_string(), AttrValue::Scalar("wizard-step".to_string()));
+            attrs.insert("kind".to_string(), AttrValue::Scalar("flow-step".to_string()));
             attrs.insert("title".to_string(), AttrValue::Scalar(step_label));
             attrs.insert(
                 "active".to_string(),
@@ -1294,16 +1294,21 @@ fn extract_steppers(html: &Html) -> Vec<ScannedStepper> {
 
 fn looks_like_stepper_label(label: &str) -> bool {
     let compact = collapse_text(label.to_string());
-    if compact.is_empty() {
+    if compact.is_empty() || compact.len() > 40 {
         return false;
     }
-    let lowered = compact.to_ascii_lowercase();
-    compact.contains("PIR")
-        || compact.contains("選択")
-        || compact.contains("種類")
-        || compact.contains("設定")
-        || compact.contains("ガイド")
-        || lowered.contains("step")
+    if compact.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let word_count = compact.split_whitespace().count();
+    if word_count > 6 {
+        return false;
+    }
+    let has_alpha_numeric = compact.chars().any(|ch| ch.is_alphanumeric());
+    let punctuation_like = compact
+        .chars()
+        .all(|ch| ch.is_ascii_punctuation() || ch.is_whitespace());
+    has_alpha_numeric && !punctuation_like
 }
 
 fn extract_controls(html: &Html) -> Vec<ScannedControl> {
@@ -2505,6 +2510,7 @@ fn infer_snapshot_drill_parents(
         group_pages.sort_by(|left, right| {
             snapshot_step_rank(left)
                 .cmp(&snapshot_step_rank(right))
+                .then(snapshot_step_name(left).cmp(&snapshot_step_name(right)))
                 .then(left.path.cmp(&right.path))
                 .then(left.snapshot_id.cmp(&right.snapshot_id))
         });
@@ -2520,17 +2526,23 @@ fn infer_snapshot_drill_parents(
 }
 
 fn snapshot_step_rank(page: &ScannedPage) -> usize {
-    match page.state_hints.get("wizard-step").map(String::as_str) {
-        Some("about") => 10,
-        Some("pirType") | Some("type") => 20,
-        Some("industryAudience") => 30,
-        Some("aiRecommend") => 40,
-        Some("selection") => 50,
-        Some("aiChat") => 60,
-        Some("customPirList") => 70,
-        Some(_) => 500,
-        None => 1000,
-    }
+    page.steppers
+        .first()
+        .and_then(|stepper| {
+            stepper
+                .active_label
+                .as_ref()
+                .and_then(|active| stepper.labels.iter().position(|label| label == active))
+        })
+        .unwrap_or(usize::MAX)
+}
+
+fn snapshot_step_name(page: &ScannedPage) -> String {
+    page.steppers
+        .first()
+        .and_then(|stepper| stepper.active_label.clone())
+        .or_else(|| page.state_hints.get("wizard-step").cloned())
+        .unwrap_or_default()
 }
 
 fn page_stepper_nodes(page: &ScannedPage) -> Vec<(String, String, bool)> {
