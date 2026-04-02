@@ -219,7 +219,6 @@ struct SnapshotManifest {
     state_hints: Option<BTreeMap<String, String>>,
 }
 
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScanConfig {
     #[serde(default)]
@@ -309,7 +308,10 @@ pub fn load_scan_config_from_path(path: &Path) -> Result<ScanConfig, ValidationE
         ValidationError::new(format!("failed to read config `{}`: {err}", path.display()))
     })?;
     serde_yaml::from_slice(&raw).map_err(|err| {
-        ValidationError::new(format!("failed to parse config `{}`: {err}", path.display()))
+        ValidationError::new(format!(
+            "failed to parse config `{}`: {err}",
+            path.display()
+        ))
     })
 }
 pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
@@ -350,10 +352,16 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    Ok(scan_html_paths_with_stage_and_config(paths, ScanStage::Abstract, &ScanConfig::default())?.document)
+    Ok(
+        scan_html_paths_with_stage_and_config(paths, ScanStage::Abstract, &ScanConfig::default())?
+            .document,
+    )
 }
 
-pub fn scan_html_paths_with_stage<I, P>(paths: I, stage: ScanStage) -> Result<ScanResult, ValidationError>
+pub fn scan_html_paths_with_stage<I, P>(
+    paths: I,
+    stage: ScanStage,
+) -> Result<ScanResult, ValidationError>
 where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
@@ -379,7 +387,7 @@ where
             ValidationError::new(format!("failed to read `{}`: {err}", path_ref.display()))
         })?;
         let raw = String::from_utf8_lossy(&raw).into_owned();
-        let html = Html::parse_document(&raw);
+        let html = scraper::Html::parse_document(&raw);
         let title = extract_title(&html).unwrap_or_else(|| infer_title_from_path(path_ref));
         let location = extract_page_location(&html, path_ref);
         let dialogs = extract_dialogs(&html, &title);
@@ -409,7 +417,9 @@ where
     }
 
     if scanned_pages.is_empty() {
-        return Err(ValidationError::new("no html or snapshot files matched input"));
+        return Err(ValidationError::new(
+            "no html or snapshot files matched input",
+        ));
     }
 
     let pages = assign_page_ids(normalize_scanned_pages(scanned_pages), config);
@@ -452,10 +462,16 @@ where
 
 fn load_scan_inputs_from_manifest(path: &Path) -> Result<Vec<ScanInput>, ValidationError> {
     let raw = fs::read(path).map_err(|err| {
-        ValidationError::new(format!("failed to read manifest `{}`: {err}", path.display()))
+        ValidationError::new(format!(
+            "failed to read manifest `{}`: {err}",
+            path.display()
+        ))
     })?;
     let manifest: SnapshotManifestFile = serde_yaml::from_slice(&raw).map_err(|err| {
-        ValidationError::new(format!("failed to parse manifest `{}`: {err}", path.display()))
+        ValidationError::new(format!(
+            "failed to parse manifest `{}`: {err}",
+            path.display()
+        ))
     })?;
     let mut snapshots = Vec::new();
     if let Some(snapshot) = manifest.snapshot {
@@ -575,7 +591,10 @@ where
 {
     let left_result = scan_html_paths_with_stage_and_config([left], ScanStage::Summary, config)?;
     let right_result = scan_html_paths_with_stage_and_config([right], ScanStage::Summary, config)?;
-    Ok(compare_scan_summaries(&left_result.summary, &right_result.summary))
+    Ok(compare_scan_summaries(
+        &left_result.summary,
+        &right_result.summary,
+    ))
 }
 
 pub fn render_compare_report(report: &CompareReport) -> String {
@@ -647,7 +666,9 @@ fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary) -> CompareRep
 }
 
 fn scan_summary_page_key(page: &ScanSummaryPage) -> String {
-    page.snapshot_id.clone().unwrap_or_else(|| page.path.clone())
+    page.snapshot_id
+        .clone()
+        .unwrap_or_else(|| page.path.clone())
 }
 
 fn compare_page_hints(
@@ -663,10 +684,15 @@ fn compare_page_hints(
         .cloned()
         .collect::<BTreeSet<_>>();
     for hint_key in hint_keys {
-        match (left.state_hints.get(&hint_key), right.state_hints.get(&hint_key)) {
+        match (
+            left.state_hints.get(&hint_key),
+            right.state_hints.get(&hint_key),
+        ) {
             (Some(l), Some(r)) if l != r => findings.push(CompareFinding {
                 kind: "state-hint-mismatch".to_string(),
-                message: format!("state `{key}` の hint `{hint_key}` が不一致: left=`{l}` right=`{r}`"),
+                message: format!(
+                    "state `{key}` の hint `{hint_key}` が不一致: left=`{l}` right=`{r}`"
+                ),
             }),
             (Some(l), None) => findings.push(CompareFinding {
                 kind: "state-hint-mismatch".to_string(),
@@ -739,7 +765,9 @@ fn compare_page_controls(
         if !left_controls.contains_key(control_key_name) {
             findings.push(CompareFinding {
                 kind: "unexpected-control".to_string(),
-                message: format!("state `{key}` で right にのみ control `{control_key_name}` がある"),
+                message: format!(
+                    "state `{key}` で right にのみ control `{control_key_name}` がある"
+                ),
             });
         }
     }
@@ -813,13 +841,19 @@ fn compare_page_nav(
     for targets in left_nav.difference(&right_nav) {
         findings.push(CompareFinding {
             kind: "nav-mismatch".to_string(),
-            message: format!("state `{key}` で right に nav target set {:?} が無い", targets),
+            message: format!(
+                "state `{key}` で right に nav target set {:?} が無い",
+                targets
+            ),
         });
     }
     for targets in right_nav.difference(&left_nav) {
         findings.push(CompareFinding {
             kind: "unexpected-nav".to_string(),
-            message: format!("state `{key}` で right にのみ nav target set {:?} がある", targets),
+            message: format!(
+                "state `{key}` で right にのみ nav target set {:?} がある",
+                targets
+            ),
         });
     }
 }
@@ -831,19 +865,34 @@ fn control_key(control: &ScannedControl) -> String {
 fn compare_control_signals(left: &ScannedControl, right: &ScannedControl) -> Vec<String> {
     let mut out = Vec::new();
     if left.active != right.active {
-        out.push(format!("active mismatch left={} right={}", left.active, right.active));
+        out.push(format!(
+            "active mismatch left={} right={}",
+            left.active, right.active
+        ));
     }
     if left.selected != right.selected {
-        out.push(format!("selected mismatch left={} right={}", left.selected, right.selected));
+        out.push(format!(
+            "selected mismatch left={} right={}",
+            left.selected, right.selected
+        ));
     }
     if left.expanded != right.expanded {
-        out.push(format!("expanded mismatch left={} right={}", left.expanded, right.expanded));
+        out.push(format!(
+            "expanded mismatch left={} right={}",
+            left.expanded, right.expanded
+        ));
     }
     if left.disabled != right.disabled {
-        out.push(format!("disabled mismatch left={} right={}", left.disabled, right.disabled));
+        out.push(format!(
+            "disabled mismatch left={} right={}",
+            left.disabled, right.disabled
+        ));
     }
     if left.checked != right.checked {
-        out.push(format!("checked mismatch left={} right={}", left.checked, right.checked));
+        out.push(format!(
+            "checked mismatch left={} right={}",
+            left.checked, right.checked
+        ));
     }
     out
 }
@@ -927,7 +976,6 @@ fn merge_scanned_page(into: &mut ScannedPage, from: ScannedPage) {
         into.steppers = from.steppers.clone();
     }
 }
-
 
 fn dedupe_nav_candidates(candidates: Vec<NavCandidate>) -> Vec<NavCandidate> {
     let mut merged = BTreeMap::<BTreeSet<String>, NavCandidate>::new();
@@ -1188,7 +1236,10 @@ fn document_from_scanned_pages(pages: &[ScannedPage], config: &ScanConfig) -> Do
     for page in &scanned_pages {
         for (step_id, step_label, is_active) in page_stepper_nodes(page) {
             let mut attrs = BTreeMap::new();
-            attrs.insert("kind".to_string(), AttrValue::Scalar("flow-step".to_string()));
+            attrs.insert(
+                "kind".to_string(),
+                AttrValue::Scalar("flow-step".to_string()),
+            );
             attrs.insert("title".to_string(), AttrValue::Scalar(step_label));
             attrs.insert(
                 "active".to_string(),
@@ -1353,7 +1404,9 @@ fn extract_steppers(html: &Html, config: &ScanConfig) -> Vec<ScannedStepper> {
             let label = indicator
                 .parent()
                 .and_then(scraper::ElementRef::wrap)
-                .and_then(|parent| extract_stepper_label_from_parent(&parent, &label_selectors, config));
+                .and_then(|parent| {
+                    extract_stepper_label_from_parent(&parent, &label_selectors, config)
+                });
             let Some(label) = label else {
                 continue;
             };
@@ -1367,7 +1420,8 @@ fn extract_steppers(html: &Html, config: &ScanConfig) -> Vec<ScannedStepper> {
         push_stepper_candidate(&mut steppers, &mut seen, indicator_labels, indicator_active);
     }
 
-    let item_selector = Selector::parse("button, [role='tab'], [role='button'], span, div").expect("stepper item selector");
+    let item_selector = Selector::parse("button, [role='tab'], [role='button'], span, div")
+        .expect("stepper item selector");
     for selector_text in &config.stepper.container_selectors {
         let Ok(selector) = Selector::parse(selector_text) else {
             continue;
@@ -1375,22 +1429,85 @@ fn extract_steppers(html: &Html, config: &ScanConfig) -> Vec<ScannedStepper> {
         for container in html.select(&selector) {
             let mut labels = Vec::new();
             let mut active_label = None;
-            for item in container.select(&item_selector) {
-                let label = collapse_text(item.text().collect::<String>());
+
+            for child in direct_element_children(&container) {
+                let label = collapse_text(child.text().collect::<String>());
                 if !looks_like_stepper_label(&label, &config.stepper) {
                     continue;
                 }
-                if is_active_stepper_indicator(&item, config) {
+                if is_active_stepper_indicator(&child, config)
+                    || child
+                        .select(&item_selector)
+                        .any(|item| is_active_stepper_indicator(&item, config))
+                {
                     active_label = Some(label.clone());
                 }
                 if labels.last() != Some(&label) && !labels.contains(&label) {
                     labels.push(label);
                 }
             }
+
+            if labels.len() < 2 {
+                for item in container.select(&item_selector) {
+                    let label = collapse_text(item.text().collect::<String>());
+                    if !looks_like_stepper_label(&label, &config.stepper) {
+                        continue;
+                    }
+                    if is_active_stepper_indicator(&item, config) {
+                        active_label = Some(label.clone());
+                    }
+                    if labels.last() != Some(&label) && !labels.contains(&label) {
+                        labels.push(label);
+                    }
+                }
+            }
+
             push_stepper_candidate(&mut steppers, &mut seen, labels, active_label);
         }
     }
-    steppers
+    normalize_steppers(steppers)
+}
+
+fn direct_element_children<'a>(
+    element: &'a scraper::ElementRef<'a>,
+) -> Vec<scraper::ElementRef<'a>> {
+    element
+        .children()
+        .filter_map(scraper::ElementRef::wrap)
+        .collect()
+}
+
+fn normalize_steppers(mut steppers: Vec<ScannedStepper>) -> Vec<ScannedStepper> {
+    steppers.sort_by_key(|stepper| stepper.labels.len());
+    let mut normalized: Vec<ScannedStepper> = Vec::new();
+    'outer: for stepper in steppers {
+        for existing in &normalized {
+            if is_contiguous_stepper_subsequence(&existing.labels, &stepper.labels) {
+                continue 'outer;
+            }
+        }
+        normalized.push(stepper);
+    }
+    normalized
+}
+
+fn is_contiguous_stepper_subsequence(needle: &[String], haystack: &[String]) -> bool {
+    if needle.len() >= haystack.len() || needle.is_empty() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .map(|label| collapse_stepper_label(label))
+            .eq(needle.iter().map(|label| collapse_stepper_label(label)))
+    })
+}
+
+fn collapse_stepper_label(label: &str) -> String {
+    label
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
 }
 
 fn extract_stepper_label_from_parent(
@@ -1411,7 +1528,10 @@ fn extract_stepper_label_from_parent(
 
 fn is_active_stepper_indicator(element: &scraper::ElementRef<'_>, config: &ScanConfig) -> bool {
     if matches!(element.value().attr("aria-selected"), Some("true"))
-        || matches!(element.value().attr("data-state"), Some("active") | Some("open"))
+        || matches!(
+            element.value().attr("data-state"),
+            Some("active") | Some("open")
+        )
     {
         return true;
     }
@@ -1432,11 +1552,18 @@ fn push_stepper_candidate(
     if labels.len() < 2 {
         return;
     }
-    let fingerprint = format!("{}|{}", labels.join("|"), active_label.clone().unwrap_or_default());
+    let fingerprint = format!(
+        "{}|{}",
+        labels.join("|"),
+        active_label.clone().unwrap_or_default()
+    );
     if !seen.insert(fingerprint) {
         return;
     }
-    steppers.push(ScannedStepper { labels, active_label });
+    steppers.push(ScannedStepper {
+        labels,
+        active_label,
+    });
 }
 
 fn looks_like_stepper_label(label: &str, config: &StepperScanConfig) -> bool {
@@ -1470,7 +1597,10 @@ fn extract_controls(html: &Html) -> Vec<ScannedControl> {
             continue;
         };
         let kind = classify_control_kind(&element);
-        let active = matches!(element.value().attr("data-state"), Some("active") | Some("open"));
+        let active = matches!(
+            element.value().attr("data-state"),
+            Some("active") | Some("open")
+        );
         let selected = matches!(element.value().attr("aria-selected"), Some("true"));
         let expanded = matches!(element.value().attr("aria-expanded"), Some("true"));
         let disabled = element.value().attr("disabled").is_some()
@@ -1594,22 +1724,19 @@ fn extract_nav_candidates(
         }
     }
     candidates.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then(
-                left.targets
-                    .iter()
-                    .map(|target| target.path.as_str())
-                    .collect::<Vec<_>>()
-                    .cmp(
-                        &right
-                            .targets
-                            .iter()
-                            .map(|target| target.path.as_str())
-                            .collect::<Vec<_>>(),
-                    ),
-            )
+        right.score.cmp(&left.score).then(
+            left.targets
+                .iter()
+                .map(|target| target.path.as_str())
+                .collect::<Vec<_>>()
+                .cmp(
+                    &right
+                        .targets
+                        .iter()
+                        .map(|target| target.path.as_str())
+                        .collect::<Vec<_>>(),
+                ),
+        )
     });
     candidates.dedup_by(|left, right| {
         left.targets
@@ -1977,7 +2104,12 @@ fn has_large_docs_index_candidate(html: &Html, page_host: Option<&str>, page_pat
             let candidate = NavCandidate {
                 label: extract_container_label(&container),
                 targets: targets.into_values().collect(),
-                score: score_nav_candidate(&container, &NavCandidateMeta { selector: selector_text.to_string() }),
+                score: score_nav_candidate(
+                    &container,
+                    &NavCandidateMeta {
+                        selector: selector_text.to_string(),
+                    },
+                ),
             };
             if is_docs_index_candidate(&candidate, page_path) {
                 return true;
@@ -1998,18 +2130,27 @@ fn extract_dialogs(html: &Html, page_title: &str) -> Vec<ScannedDialog> {
         Selector::parse("h1, h2, h3, [aria-label], [title]").expect("dialog heading selector");
     let mut dialogs = Vec::new();
     let mut used_ids = BTreeSet::new();
+    let mut seen_dom_ids = BTreeSet::new();
+    let mut seen_title_kind = BTreeSet::new();
     for selector_text in selectors {
         let selector = Selector::parse(selector_text).expect("dialog selector");
         for element in html.select(&selector) {
             let title = extract_dialog_title(&element, &heading_selector, page_title);
             let dom_id = element.value().attr("id").map(ToOwned::to_owned);
+            let dialog_kind = classify_dialog_kind(&element, dom_id.as_deref(), &title);
+            if let Some(dom_id) = &dom_id {
+                if !seen_dom_ids.insert(dom_id.clone()) {
+                    continue;
+                }
+            } else if !seen_title_kind.insert(format!("{title}|{dialog_kind}")) {
+                continue;
+            }
             let base = element
                 .value()
                 .attr("id")
                 .map(|id| make_identifier(id, ""))
                 .filter(|id| !id.is_empty())
                 .unwrap_or_else(|| make_identifier(&title, "Dialog"));
-            let dialog_kind = classify_dialog_kind(&element, dom_id.as_deref(), &title);
             let mut dialog_id = if base.ends_with("Dialog") {
                 base
             } else {
@@ -2579,7 +2720,6 @@ fn make_identifier(input: &str, fallback: &str) -> String {
     }
 }
 
-
 #[cfg(test)]
 fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
     build_drill_section_with_config(pages, &ScanConfig::default())
@@ -2664,7 +2804,10 @@ fn infer_snapshot_drill_parents(
         group_pages.sort_by(|left, right| {
             snapshot_step_rank(left)
                 .cmp(&snapshot_step_rank(right))
-                .then(snapshot_step_name(left, &config.snapshot).cmp(&snapshot_step_name(right, &config.snapshot)))
+                .then(
+                    snapshot_step_name(left, &config.snapshot)
+                        .cmp(&snapshot_step_name(right, &config.snapshot)),
+                )
                 .then(left.path.cmp(&right.path))
                 .then(left.snapshot_id.cmp(&right.snapshot_id))
         });
@@ -2683,7 +2826,11 @@ fn snapshot_flow_key(page: &ScannedPage, config: &SnapshotScanConfig) -> String 
     config
         .flow_hint_keys
         .iter()
-        .filter_map(|key| page.state_hints.get(key).map(|value| format!("{key}={value}")))
+        .filter_map(|key| {
+            page.state_hints
+                .get(key)
+                .map(|value| format!("{key}={value}"))
+        })
         .collect::<Vec<_>>()
         .join("|")
 }
@@ -3521,12 +3668,12 @@ mod tests {
     };
 
     use super::{
-        build_drill_section, infer_layout_groups, infer_page_path, load_document_from_path,
-        load_documents_from_paths, normalize_logical_page_path, normalize_scanned_pages,
-        compare_scan_inputs, compare_scan_inputs_with_config, parse_document, prune_redundant_nav_clusters, render_compare_report,
-        render_document, render_scan_summary, scan_html_paths, scan_html_paths_with_stage,
-        validate_document, AttrValue, NavCandidate, NavCluster, ScanConfig, ScanStage, ScannedPage,
-        ScannedTarget, TreeChild,
+        build_drill_section, compare_scan_inputs, compare_scan_inputs_with_config,
+        infer_layout_groups, infer_page_path, load_document_from_path, load_documents_from_paths,
+        normalize_logical_page_path, normalize_scanned_pages, parse_document,
+        prune_redundant_nav_clusters, render_compare_report, render_document, render_scan_summary,
+        scan_html_paths, scan_html_paths_with_stage, validate_document, AttrValue, NavCandidate,
+        NavCluster, ScanConfig, ScanStage, ScannedPage, ScannedTarget, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -3758,12 +3905,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
-        snapshot_id: None,
-        snapshot_url: None,
-        snapshot_actions: Vec::new(),
-        state_hints: BTreeMap::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
         };
         let docs = ScannedPage {
             page_id: "Docs".to_string(),
@@ -3774,12 +3921,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
-        snapshot_id: None,
-        snapshot_url: None,
-        snapshot_actions: Vec::new(),
-        state_hints: BTreeMap::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -3790,12 +3937,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
-        snapshot_id: None,
-        snapshot_url: None,
-        snapshot_actions: Vec::new(),
-        state_hints: BTreeMap::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
         };
         let advanced = ScannedPage {
             page_id: "Advanced".to_string(),
@@ -3806,12 +3953,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
-        snapshot_id: None,
-        snapshot_url: None,
-        snapshot_actions: Vec::new(),
-        state_hints: BTreeMap::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
         };
 
         let drill = build_drill_section(&[home, docs, guide, advanced]);
@@ -3923,12 +4070,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
-        snapshot_id: None,
-        snapshot_url: None,
-        snapshot_actions: Vec::new(),
-        state_hints: BTreeMap::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -3939,12 +4086,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
-        snapshot_id: None,
-        snapshot_url: None,
-        snapshot_actions: Vec::new(),
-        state_hints: BTreeMap::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
         };
         let faq = ScannedPage {
             page_id: "Faq".to_string(),
@@ -3959,12 +4106,12 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
-        snapshot_id: None,
-        snapshot_url: None,
-        snapshot_actions: Vec::new(),
-        state_hints: BTreeMap::new(),
+            controls: Vec::new(),
+            steppers: Vec::new(),
+            snapshot_id: None,
+            snapshot_url: None,
+            snapshot_actions: Vec::new(),
+            state_hints: BTreeMap::new(),
         };
 
         let drill = build_drill_section(&[root, guide, faq]);
@@ -3987,12 +4134,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
-            controls: Vec::new(),
-            steppers: Vec::new(),
-            snapshot_id: None,
-            snapshot_url: None,
-            snapshot_actions: Vec::new(),
-            state_hints: BTreeMap::new(),
+                controls: Vec::new(),
+                steppers: Vec::new(),
+                snapshot_id: None,
+                snapshot_url: None,
+                snapshot_actions: Vec::new(),
+                state_hints: BTreeMap::new(),
             },
             ScannedPage {
                 page_id: "My".to_string(),
@@ -4003,12 +4150,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
-            controls: Vec::new(),
-            steppers: Vec::new(),
-            snapshot_id: None,
-            snapshot_url: None,
-            snapshot_actions: Vec::new(),
-            state_hints: BTreeMap::new(),
+                controls: Vec::new(),
+                steppers: Vec::new(),
+                snapshot_id: None,
+                snapshot_url: None,
+                snapshot_actions: Vec::new(),
+                state_hints: BTreeMap::new(),
             },
             ScannedPage {
                 page_id: "MyOrders".to_string(),
@@ -4019,12 +4166,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
-            controls: Vec::new(),
-            steppers: Vec::new(),
-            snapshot_id: None,
-            snapshot_url: None,
-            snapshot_actions: Vec::new(),
-            state_hints: BTreeMap::new(),
+                controls: Vec::new(),
+                steppers: Vec::new(),
+                snapshot_id: None,
+                snapshot_url: None,
+                snapshot_actions: Vec::new(),
+                state_hints: BTreeMap::new(),
             },
         ];
         let nav = BTreeMap::from([
@@ -4348,12 +4495,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
-            controls: Vec::new(),
-            steppers: Vec::new(),
-            snapshot_id: None,
-            snapshot_url: None,
-            snapshot_actions: Vec::new(),
-            state_hints: BTreeMap::new(),
+                controls: Vec::new(),
+                steppers: Vec::new(),
+                snapshot_id: None,
+                snapshot_url: None,
+                snapshot_actions: Vec::new(),
+                state_hints: BTreeMap::new(),
             },
             ScannedPage {
                 page_id: String::new(),
@@ -4364,12 +4511,12 @@ node:
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::from(["WelcomeDialog".to_string()]),
-            controls: Vec::new(),
-            steppers: Vec::new(),
-            snapshot_id: None,
-            snapshot_url: None,
-            snapshot_actions: Vec::new(),
-            state_hints: BTreeMap::new(),
+                controls: Vec::new(),
+                steppers: Vec::new(),
+                snapshot_id: None,
+                snapshot_url: None,
+                snapshot_actions: Vec::new(),
+                state_hints: BTreeMap::new(),
             },
         ]);
 
@@ -4457,8 +4604,12 @@ node:
 
         let mut config = ScanConfig::default();
         config.stepper.indicator_selectors = vec!["[data-testid^='step-indicator-']".to_string()];
-        config.stepper.active_class_contains = vec!["bg-primary".to_string(), "text-primary-foreground".to_string()];
-        let report = compare_scan_inputs_with_config(&left_manifest, &right_manifest, &config).expect("compare");
+        config.stepper.active_class_contains = vec![
+            "bg-primary".to_string(),
+            "text-primary-foreground".to_string(),
+        ];
+        let report = compare_scan_inputs_with_config(&left_manifest, &right_manifest, &config)
+            .expect("compare");
         let rendered = render_compare_report(&report);
         assert!(rendered.contains("[missing-dialog]"));
         assert!(rendered.contains("[missing-control]"));
@@ -4519,6 +4670,47 @@ node:
         assert!(rendered.contains("right にのみ control `button:右だけ` がある"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn extract_dialogs_dedupes_same_title_without_dom_id() {
+        let html = scraper::Html::parse_document(
+            r#"<!doctype html><html><body>
+            <div role='dialog' aria-label='PIR設定ウィザード'></div>
+            <div role='dialog' aria-label='PIR設定ウィザード'></div>
+            </body></html>"#,
+        );
+        let dialogs = super::extract_dialogs(&html, "PIR");
+        assert_eq!(dialogs.len(), 1);
+        assert_eq!(dialogs[0].title, "PIR設定ウィザード");
+    }
+
+    #[test]
+    fn extract_steppers_dedupes_nested_container_variants() {
+        let html = scraper::Html::parse_document(
+            r#"<!doctype html><html><body>
+            <div class='wizard-header'>
+              <div class='stepper-inline'>
+                <div class='step'><span>PIRとは</span></div>
+                <div class='step'><span>2PIR種類</span></div>
+                <div class='step'><span>3PIR選択</span></div>
+              </div>
+            </div>
+            <div class='wizard-header'>
+              <div class='stepper-inline'>
+                <div class='all-labels'>PIRとは2PIR種類3PIR選択</div>
+                <div class='step'><span>PIRとは</span></div>
+                <div class='step'><span>2PIR種類</span></div>
+                <div class='step'><span>3PIR選択</span></div>
+                <button>設定を始める</button>
+              </div>
+            </div>
+            </body></html>"#,
+        );
+        let config = ScanConfig::default();
+        let steppers = super::extract_steppers(&html, &config);
+        assert_eq!(steppers.len(), 1);
+        assert_eq!(steppers[0].labels, vec!["PIRとは", "2PIR種類", "3PIR選択"]);
     }
 
     #[test]
