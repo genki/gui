@@ -94,15 +94,15 @@ leaf は `Page:` のように null child で表現でき、loader/preparser は 
 ## CLI
 
 ```sh
-cargo run -- check examples/demo.gui
-cargo run -- check examples/demo.gui other.gui
-cargo run -- check
-cargo run -- page examples/demo.gui
-cargo run -- page
-cargo run -- drill
-cargo run -- inherit
-cargo run -- node
-cargo run -- nav
+gui check examples/demo.gui
+gui check examples/demo.gui other.gui
+gui check
+gui page examples/demo.gui
+gui page
+gui drill
+gui inherit
+gui node
+gui nav
 ```
 
 引数を省略した場合は、実行ディレクトリ配下を再帰走査して見つかったすべての
