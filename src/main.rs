@@ -4,7 +4,7 @@ use std::{
     process,
 };
 
-use gui::{
+use abstract_gui::{
     load_documents_from_paths, page_nodes, validate_document, Document, TreeChild, TreeSection,
 };
 

@@ -1,4 +1,7 @@
-# gui
+# abstract-gui
+
+Installable package name: `abstract-gui`.
+Executable command name: `gui`.
 
 Declarative `.gui` format for modeling GUI structure with two forests:
 

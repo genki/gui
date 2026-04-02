@@ -1,9 +1,12 @@
 [package]
-name = "gui"
+name = "abstract-gui"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "gui"
+path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-
