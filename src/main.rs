@@ -5,8 +5,9 @@ use std::{
 };
 
 use abstract_gui::{
-    load_documents_from_paths, page_nodes, render_document, render_scan_summary,
-    scan_html_paths_with_stage, validate_document, Document, ScanStage, TreeChild, TreeSection,
+    compare_scan_inputs, load_documents_from_paths, page_nodes, render_compare_report,
+    render_document, render_scan_summary, scan_html_paths_with_stage, validate_document,
+    Document, ScanStage, TreeChild, TreeSection,
 };
 
 fn main() {
@@ -18,7 +19,7 @@ fn main() {
     };
     if !matches!(
         command.as_str(),
-        "check" | "page" | "drill" | "inherit" | "node" | "nav" | "scan"
+        "check" | "page" | "drill" | "inherit" | "node" | "nav" | "scan" | "compare"
     ) {
         eprintln!("unknown command: {command}");
         print_usage(&program);
@@ -36,10 +37,10 @@ fn main() {
     } else {
         (ScanStage::Abstract, raw_args)
     };
-    let paths = match if command == "scan" {
-        resolve_scan_input_paths(raw_paths)
-    } else {
-        resolve_input_paths(raw_paths)
+    let paths = match match command.as_str() {
+        "scan" => resolve_scan_input_paths(raw_paths),
+        "compare" => resolve_compare_input_paths(raw_paths),
+        _ => resolve_input_paths(raw_paths),
     } {
         Ok(paths) => paths,
         Err(message) => {
@@ -109,6 +110,16 @@ fn main() {
                 ScanStage::Summary => print!("{}", render_scan_summary(&result.summary)),
             }
         }
+        "compare" => {
+            let report = match compare_scan_inputs(&paths[0], &paths[1]) {
+                Ok(report) => report,
+                Err(err) => {
+                    eprintln!("compare error: {}", err.message);
+                    process::exit(1);
+                }
+            };
+            print!("{}", render_compare_report(&report));
+        }
         _ => unreachable!(),
     }
 }
@@ -122,6 +133,7 @@ fn print_usage(program: &str) {
     eprintln!("       {program} nav [file.gui ...]");
     eprintln!("       {program} scan <file.html> [more.html ...]");
     eprintln!("       {program} scan --stage summary <file.html|snapshot.yaml> [...]");
+    eprintln!("       {program} compare <left.html|left.yaml> <right.html|right.yaml>");
 }
 
 fn load_and_validate(paths: &[PathBuf]) -> Document {
@@ -206,6 +218,18 @@ fn resolve_scan_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> 
     )
 }
 
+fn resolve_compare_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
+    let resolved = resolve_paths_by_extension(
+        paths,
+        &["html", "htm", "yaml", "yml"],
+        "compare requires exactly two html or yaml files",
+    )?;
+    if resolved.len() != 2 {
+        return Err("compare requires exactly two html or yaml files".to_string());
+    }
+    Ok(resolved)
+}
+
 fn parse_scan_args(args: Vec<String>) -> Result<(ScanStage, Vec<String>), String> {
     let mut stage = ScanStage::Abstract;
     let mut paths = Vec::new();
@@ -267,7 +291,7 @@ fn resolve_paths_by_extension(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_scan_args, resolve_input_paths, resolve_scan_input_paths};
+    use super::{parse_scan_args, resolve_compare_input_paths, resolve_input_paths, resolve_scan_input_paths};
     use abstract_gui::ScanStage;
     use std::{
         fs,
@@ -313,6 +337,12 @@ mod tests {
         .expect("parse");
         assert_eq!(stage, ScanStage::Summary);
         assert_eq!(paths, vec!["sample.yaml".to_string()]);
+    }
+
+    #[test]
+    fn resolve_compare_input_paths_requires_two_inputs() {
+        let err = resolve_compare_input_paths(vec!["one.html".to_string()]).expect_err("should fail");
+        assert!(err.contains("exactly two"));
     }
 
     #[test]

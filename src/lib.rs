@@ -136,6 +136,17 @@ pub enum ScanStage {
 }
 
 #[derive(Debug, Clone)]
+pub struct CompareReport {
+    findings: Vec<CompareFinding>,
+}
+
+#[derive(Debug, Clone)]
+struct CompareFinding {
+    kind: String,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ScanResult {
     pub document: Document,
     pub summary: ScanSummary,
@@ -426,6 +437,233 @@ fn build_scan_summary(pages: &[ScannedPage]) -> ScanSummary {
 
 pub fn render_scan_summary(summary: &ScanSummary) -> String {
     serde_yaml::to_string(summary).expect("scan summary yaml")
+}
+
+pub fn compare_scan_inputs<L, R>(left: L, right: R) -> Result<CompareReport, ValidationError>
+where
+    L: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    let left_result = scan_html_paths_with_stage([left], ScanStage::Summary)?;
+    let right_result = scan_html_paths_with_stage([right], ScanStage::Summary)?;
+    Ok(compare_scan_summaries(&left_result.summary, &right_result.summary))
+}
+
+pub fn render_compare_report(report: &CompareReport) -> String {
+    if report.findings.is_empty() {
+        return "ok\n".to_string();
+    }
+    let mut out = String::new();
+    let mut current_kind = String::new();
+    for finding in &report.findings {
+        if finding.kind != current_kind {
+            if !current_kind.is_empty() {
+                out.push('\n');
+            }
+            current_kind = finding.kind.clone();
+            out.push('[');
+            out.push_str(&current_kind);
+            out.push_str("]\n");
+        }
+        out.push_str("- ");
+        out.push_str(&finding.message);
+        out.push('\n');
+    }
+    out
+}
+
+fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary) -> CompareReport {
+    let mut findings = Vec::new();
+    let left_pages = left
+        .pages
+        .iter()
+        .map(|page| (scan_summary_page_key(page), page))
+        .collect::<BTreeMap<_, _>>();
+    let right_pages = right
+        .pages
+        .iter()
+        .map(|page| (scan_summary_page_key(page), page))
+        .collect::<BTreeMap<_, _>>();
+
+    for key in left_pages.keys() {
+        if !right_pages.contains_key(key) {
+            findings.push(CompareFinding {
+                kind: "missing-state".to_string(),
+                message: format!("right に state `{key}` が存在しない"),
+            });
+        }
+    }
+    for key in right_pages.keys() {
+        if !left_pages.contains_key(key) {
+            findings.push(CompareFinding {
+                kind: "unexpected-state".to_string(),
+                message: format!("right にのみ state `{key}` が存在する"),
+            });
+        }
+    }
+
+    for (key, left_page) in &left_pages {
+        let Some(right_page) = right_pages.get(key) else {
+            continue;
+        };
+        compare_page_hints(key, left_page, right_page, &mut findings);
+        compare_page_dialogs(key, left_page, right_page, &mut findings);
+        compare_page_controls(key, left_page, right_page, &mut findings);
+        compare_page_nav(key, left_page, right_page, &mut findings);
+    }
+
+    findings.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.message.cmp(&b.message)));
+    CompareReport { findings }
+}
+
+fn scan_summary_page_key(page: &ScanSummaryPage) -> String {
+    page.snapshot_id.clone().unwrap_or_else(|| page.path.clone())
+}
+
+fn compare_page_hints(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let hint_keys = left
+        .state_hints
+        .keys()
+        .chain(right.state_hints.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for hint_key in hint_keys {
+        match (left.state_hints.get(&hint_key), right.state_hints.get(&hint_key)) {
+            (Some(l), Some(r)) if l != r => findings.push(CompareFinding {
+                kind: "state-hint-mismatch".to_string(),
+                message: format!("state `{key}` の hint `{hint_key}` が不一致: left=`{l}` right=`{r}`"),
+            }),
+            (Some(l), None) => findings.push(CompareFinding {
+                kind: "state-hint-mismatch".to_string(),
+                message: format!("state `{key}` の hint `{hint_key}` が right に無い: left=`{l}`"),
+            }),
+            (None, Some(r)) => findings.push(CompareFinding {
+                kind: "state-hint-mismatch".to_string(),
+                message: format!("state `{key}` の hint `{hint_key}` が left に無い: right=`{r}`"),
+            }),
+            _ => {}
+        }
+    }
+}
+
+fn compare_page_dialogs(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_dialogs = left
+        .dialogs
+        .iter()
+        .map(|dialog| dialog.title.clone())
+        .collect::<BTreeSet<_>>();
+    let right_dialogs = right
+        .dialogs
+        .iter()
+        .map(|dialog| dialog.title.clone())
+        .collect::<BTreeSet<_>>();
+    for title in left_dialogs.difference(&right_dialogs) {
+        findings.push(CompareFinding {
+            kind: "missing-dialog".to_string(),
+            message: format!("state `{key}` で right に dialog `{title}` が無い"),
+        });
+    }
+    for title in right_dialogs.difference(&left_dialogs) {
+        findings.push(CompareFinding {
+            kind: "unexpected-dialog".to_string(),
+            message: format!("state `{key}` で right にのみ dialog `{title}` がある"),
+        });
+    }
+}
+
+fn compare_page_controls(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_controls = left
+        .controls
+        .iter()
+        .map(|control| (control_key(control), control))
+        .collect::<BTreeMap<_, _>>();
+    let right_controls = right
+        .controls
+        .iter()
+        .map(|control| (control_key(control), control))
+        .collect::<BTreeMap<_, _>>();
+    for control_key_name in left_controls.keys() {
+        if !right_controls.contains_key(control_key_name) {
+            findings.push(CompareFinding {
+                kind: "missing-control".to_string(),
+                message: format!("state `{key}` で right に control `{control_key_name}` が無い"),
+            });
+        }
+    }
+    for (control_key_name, left_control) in &left_controls {
+        let Some(right_control) = right_controls.get(control_key_name) else {
+            continue;
+        };
+        for mismatch in compare_control_signals(left_control, right_control) {
+            findings.push(CompareFinding {
+                kind: "signal-mismatch".to_string(),
+                message: format!("state `{key}` の control `{control_key_name}` で {mismatch}"),
+            });
+        }
+    }
+}
+
+fn compare_page_nav(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_nav = left
+        .nav_candidates
+        .iter()
+        .map(|candidate| candidate.targets.iter().cloned().collect::<BTreeSet<_>>())
+        .collect::<BTreeSet<_>>();
+    let right_nav = right
+        .nav_candidates
+        .iter()
+        .map(|candidate| candidate.targets.iter().cloned().collect::<BTreeSet<_>>())
+        .collect::<BTreeSet<_>>();
+    for targets in left_nav.difference(&right_nav) {
+        findings.push(CompareFinding {
+            kind: "nav-mismatch".to_string(),
+            message: format!("state `{key}` で right に nav target set {:?} が無い", targets),
+        });
+    }
+}
+
+fn control_key(control: &ScannedControl) -> String {
+    format!("{}:{}", control.kind, control.label)
+}
+
+fn compare_control_signals(left: &ScannedControl, right: &ScannedControl) -> Vec<String> {
+    let mut out = Vec::new();
+    if left.active != right.active {
+        out.push(format!("active mismatch left={} right={}", left.active, right.active));
+    }
+    if left.selected != right.selected {
+        out.push(format!("selected mismatch left={} right={}", left.selected, right.selected));
+    }
+    if left.expanded != right.expanded {
+        out.push(format!("expanded mismatch left={} right={}", left.expanded, right.expanded));
+    }
+    if left.disabled != right.disabled {
+        out.push(format!("disabled mismatch left={} right={}", left.disabled, right.disabled));
+    }
+    if left.checked != right.checked {
+        out.push(format!("checked mismatch left={} right={}", left.checked, right.checked));
+    }
+    out
 }
 
 fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
@@ -2768,9 +3006,10 @@ mod tests {
     use super::{
         build_drill_section, infer_layout_groups, infer_page_path, load_document_from_path,
         load_documents_from_paths, normalize_logical_page_path, normalize_scanned_pages,
-        parse_document, prune_redundant_nav_clusters, render_document, render_scan_summary,
-        scan_html_paths, scan_html_paths_with_stage, validate_document, AttrValue, NavCandidate,
-        NavCluster, ScanStage, ScannedPage, ScannedTarget, TreeChild,
+        compare_scan_inputs, parse_document, prune_redundant_nav_clusters, render_compare_report,
+        render_document, render_scan_summary, scan_html_paths, scan_html_paths_with_stage,
+        validate_document, AttrValue, NavCandidate, NavCluster, ScanStage, ScannedPage,
+        ScannedTarget, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -3612,6 +3851,79 @@ node:
             BTreeSet::from(["WelcomeDialog".to_string()])
         );
         assert_eq!(merged[0].nav_candidates.len(), 1);
+    }
+
+    #[test]
+    fn compare_scan_inputs_reports_dialog_and_hint_mismatch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-compare-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left_html = dir.join("left.html");
+        let right_html = dir.join("right.html");
+        let left_manifest = dir.join("left.snapshot.yaml");
+        let right_manifest = dir.join("right.snapshot.yaml");
+        fs::write(
+            &left_html,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>PIR</title>
+    <link rel="canonical" href="https://example.test/client-admin/pir-management" />
+  </head>
+  <body>
+    <button>PIR設定を変更</button>
+    <dialog id="pir-wizard" aria-label="PIR設定ウィザード"></dialog>
+  </body>
+</html>"#,
+        )
+        .expect("write left html");
+        fs::write(
+            &right_html,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>PIR</title>
+    <link rel="canonical" href="https://example.test/client-admin/pir-management" />
+  </head>
+  <body>
+    <button>ブリーフィング通知設定</button>
+  </body>
+</html>"#,
+        )
+        .expect("write right html");
+        fs::write(
+            &left_manifest,
+            r#"snapshot:
+  id: pir-state
+  url: /client-admin/pir-management
+  html: left.html
+  stateHints:
+    wizard-step: about
+"#,
+        )
+        .expect("write left manifest");
+        fs::write(
+            &right_manifest,
+            r#"snapshot:
+  id: pir-state
+  url: /client-admin/pir-management
+  html: right.html
+  stateHints:
+    wizard-step: type
+"#,
+        )
+        .expect("write right manifest");
+
+        let report = compare_scan_inputs(&left_manifest, &right_manifest).expect("compare");
+        let rendered = render_compare_report(&report);
+        assert!(rendered.contains("[missing-dialog]"));
+        assert!(rendered.contains("[missing-control]"));
+        assert!(rendered.contains("[state-hint-mismatch]"));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
