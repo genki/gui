@@ -82,6 +82,7 @@ foo:
 
 ```sh
 cargo run -- check examples/demo.gui
+cargo run -- pages examples/demo.gui
 ```
 
 ## Status

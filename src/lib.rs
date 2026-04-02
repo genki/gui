@@ -79,10 +79,7 @@ pub fn validate_document(doc: &Document) -> Result<(), Vec<ValidationError>> {
 
     let inherit_leaves = collect_inherit_leaves(&doc.inherit, &mut errors);
     let drill_nodes = collect_all_nodes(&doc.drill, true, &mut errors);
-    let pages = inherit_leaves
-        .union(&drill_nodes)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let pages = page_nodes_from_sets(&inherit_leaves, &drill_nodes);
 
     for node in &drill_nodes {
         if !pages.contains(node) {
@@ -132,6 +129,17 @@ pub fn validate_document(doc: &Document) -> Result<(), Vec<ValidationError>> {
 
     if errors.is_empty() {
         Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+pub fn page_nodes(doc: &Document) -> Result<BTreeSet<String>, Vec<ValidationError>> {
+    let mut errors = Vec::new();
+    let inherit_leaves = collect_inherit_leaves(&doc.inherit, &mut errors);
+    let drill_nodes = collect_all_nodes(&doc.drill, true, &mut errors);
+    if errors.is_empty() {
+        Ok(page_nodes_from_sets(&inherit_leaves, &drill_nodes))
     } else {
         Err(errors)
     }
@@ -306,6 +314,13 @@ fn required_string(map: &Mapping, key: &str, context: &str) -> Result<String, Va
         .as_str()
         .map(ToOwned::to_owned)
         .ok_or_else(|| ValidationError::new(format!("{context} field `{key}` must be a string")))
+}
+
+fn page_nodes_from_sets(
+    inherit_leaves: &BTreeSet<String>,
+    drill_nodes: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    inherit_leaves.union(drill_nodes).cloned().collect()
 }
 
 fn collect_inherit_leaves(

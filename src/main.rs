@@ -1,25 +1,25 @@
 use std::{env, fs, process};
 
-use gui::{parse_document, validate_document};
+use gui::{page_nodes, parse_document, validate_document};
 
 fn main() {
     let mut args = env::args();
     let program = args.next().unwrap_or_else(|| "gui".to_string());
     let Some(command) = args.next() else {
-        eprintln!("usage: {program} check <file.gui>");
+        eprintln!("usage: {program} <check|pages> <file.gui>");
         process::exit(2);
     };
-    if command != "check" {
+    if command != "check" && command != "pages" {
         eprintln!("unknown command: {command}");
-        eprintln!("usage: {program} check <file.gui>");
+        eprintln!("usage: {program} <check|pages> <file.gui>");
         process::exit(2);
     }
     let Some(path) = args.next() else {
-        eprintln!("usage: {program} check <file.gui>");
+        eprintln!("usage: {program} <check|pages> <file.gui>");
         process::exit(2);
     };
     if args.next().is_some() {
-        eprintln!("usage: {program} check <file.gui>");
+        eprintln!("usage: {program} <check|pages> <file.gui>");
         process::exit(2);
     }
 
@@ -39,12 +39,38 @@ fn main() {
         }
     };
 
-    if let Err(errors) = validate_document(&doc) {
-        for err in errors {
-            eprintln!("validation error: {}", err.message);
-        }
-        process::exit(1);
-    }
+    match command.as_str() {
+        "check" => {
+            if let Err(errors) = validate_document(&doc) {
+                for err in errors {
+                    eprintln!("validation error: {}", err.message);
+                }
+                process::exit(1);
+            }
 
-    println!("ok: {path}");
+            println!("ok: {path}");
+        }
+        "pages" => {
+            if let Err(errors) = validate_document(&doc) {
+                for err in errors {
+                    eprintln!("validation error: {}", err.message);
+                }
+                process::exit(1);
+            }
+            match page_nodes(&doc) {
+                Ok(pages) => {
+                    for page in pages {
+                        println!("{page}");
+                    }
+                }
+                Err(errors) => {
+                    for err in errors {
+                        eprintln!("validation error: {}", err.message);
+                    }
+                    process::exit(1);
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
 }
