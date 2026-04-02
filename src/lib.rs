@@ -64,6 +64,8 @@ struct ScannedPage {
     breadcrumb_paths: Vec<String>,
     nav_candidates: Vec<NavCandidate>,
     has_docs_index_candidate: bool,
+    dialogs: Vec<ScannedDialog>,
+    opens: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +102,12 @@ struct NavCluster {
 struct LayoutGroup {
     layout_id: String,
     members: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ScannedDialog {
+    dialog_id: String,
+    title: String,
 }
 
 pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
@@ -161,17 +169,27 @@ where
 
     let pages = raw_pages
         .into_iter()
-        .map(|(page_id, title, location, html)| ScannedPage {
-            breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
-            nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path),
-            has_docs_index_candidate: has_large_docs_index_candidate(
-                &html,
-                location.host.as_deref(),
-                &location.path,
-            ),
-            page_id,
-            title,
-            path: location.path,
+        .map(|(page_id, title, location, html)| {
+            let dialogs = extract_dialogs(&html, &title);
+            let opens = extract_dialog_opens(&html, &dialogs);
+            ScannedPage {
+                breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
+                nav_candidates: extract_nav_candidates(
+                    &html,
+                    location.host.as_deref(),
+                    &location.path,
+                ),
+                has_docs_index_candidate: has_large_docs_index_candidate(
+                    &html,
+                    location.host.as_deref(),
+                    &location.path,
+                ),
+                dialogs,
+                opens,
+                page_id,
+                title,
+                path: location.path,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -223,6 +241,8 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
                         breadcrumb_paths: Vec::new(),
                         nav_candidates: Vec::new(),
                         has_docs_index_candidate: false,
+                        dialogs: Vec::new(),
+                        opens: BTreeSet::new(),
                     }
                 });
             }
@@ -330,7 +350,19 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
                 attrs.insert("nav".to_string(), AttrValue::Vector(filtered));
             }
         }
+        if !page.opens.is_empty() {
+            attrs.insert("opens".to_string(), AttrValue::Vector(page.opens.clone()));
+        }
         node.insert(page.page_id.clone(), NodeSpec { attrs });
+    }
+
+    for page in &scanned_pages {
+        for dialog in &page.dialogs {
+            let mut attrs = BTreeMap::new();
+            attrs.insert("kind".to_string(), AttrValue::Scalar("dialog".to_string()));
+            attrs.insert("title".to_string(), AttrValue::Scalar(dialog.title.clone()));
+            node.insert(dialog.dialog_id.clone(), NodeSpec { attrs });
+        }
     }
 
     let inherit = build_inherit_section(&scanned_pages, &layout_groups);
@@ -824,6 +856,168 @@ fn has_large_docs_index_candidate(html: &Html, page_host: Option<&str>, page_pat
         }
     }
     false
+}
+
+fn extract_dialogs(html: &Html, page_title: &str) -> Vec<ScannedDialog> {
+    let selectors = [
+        "dialog",
+        "[role='dialog']",
+        "[role='alertdialog']",
+        "[aria-modal='true']",
+    ];
+    let heading_selector =
+        Selector::parse("h1, h2, h3, [aria-label], [title]").expect("dialog heading selector");
+    let mut dialogs = Vec::new();
+    let mut used_ids = BTreeSet::new();
+    for selector_text in selectors {
+        let selector = Selector::parse(selector_text).expect("dialog selector");
+        for element in html.select(&selector) {
+            let title = extract_dialog_title(&element, &heading_selector, page_title);
+            let base = element
+                .value()
+                .attr("id")
+                .map(|id| make_identifier(id, ""))
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| make_identifier(&title, "Dialog"));
+            let mut dialog_id = if base.ends_with("Dialog") {
+                base
+            } else {
+                format!("{base}Dialog")
+            };
+            if dialog_id.is_empty() {
+                dialog_id = "Dialog".to_string();
+            }
+            if !used_ids.insert(dialog_id.clone()) {
+                for index in 2.. {
+                    let candidate = format!("{dialog_id}{index}");
+                    if used_ids.insert(candidate.clone()) {
+                        dialog_id = candidate;
+                        break;
+                    }
+                }
+            }
+            dialogs.push(ScannedDialog { dialog_id, title });
+        }
+    }
+    dialogs
+}
+
+fn extract_dialog_title(
+    element: &scraper::ElementRef<'_>,
+    heading_selector: &Selector,
+    page_title: &str,
+) -> String {
+    for attr in ["aria-label", "title"] {
+        if let Some(value) = element
+            .value()
+            .attr(attr)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return value.to_string();
+        }
+    }
+    if let Some(heading) = element.select(heading_selector).next() {
+        let heading_text = collapse_text(heading.text().collect::<String>());
+        if !heading_text.is_empty() {
+            return heading_text;
+        }
+        for attr in ["aria-label", "title"] {
+            if let Some(value) = heading
+                .value()
+                .attr(attr)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return value.to_string();
+            }
+        }
+    }
+    let text = collapse_text(element.text().collect::<String>());
+    if !text.is_empty() {
+        return text
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    format!("{page_title} dialog")
+}
+
+fn extract_dialog_opens(html: &Html, dialogs: &[ScannedDialog]) -> BTreeSet<String> {
+    if dialogs.is_empty() {
+        return BTreeSet::new();
+    }
+    let dialog_ids_by_dom_id = build_dialog_dom_id_map(html, dialogs);
+    if dialog_ids_by_dom_id.is_empty() {
+        return BTreeSet::new();
+    }
+    let selector = Selector::parse(
+        "button[aria-controls], a[aria-controls], [aria-haspopup='dialog'][aria-controls], a[href^='#'], [data-dialog], [data-dialog-target], [data-modal-target]",
+    )
+    .expect("dialog trigger selector");
+    let mut opens = BTreeSet::new();
+    for trigger in html.select(&selector) {
+        for attr in [
+            "aria-controls",
+            "data-dialog",
+            "data-dialog-target",
+            "data-modal-target",
+        ] {
+            if let Some(target) = trigger.value().attr(attr) {
+                if let Some(dialog_id) =
+                    resolve_dialog_id_from_target(target, &dialog_ids_by_dom_id)
+                {
+                    opens.insert(dialog_id);
+                }
+            }
+        }
+        if let Some(href) = trigger.value().attr("href") {
+            if let Some(dialog_id) = resolve_dialog_id_from_target(href, &dialog_ids_by_dom_id) {
+                opens.insert(dialog_id);
+            }
+        }
+    }
+    opens
+}
+
+fn build_dialog_dom_id_map(html: &Html, dialogs: &[ScannedDialog]) -> BTreeMap<String, String> {
+    let selectors = [
+        "dialog[id]",
+        "[role='dialog'][id]",
+        "[role='alertdialog'][id]",
+        "[aria-modal='true'][id]",
+    ];
+    let mut map = BTreeMap::new();
+    let mut idx = 0usize;
+    for selector_text in selectors {
+        let selector = Selector::parse(selector_text).expect("dialog selector");
+        for element in html.select(&selector) {
+            let Some(dom_id) = element.value().attr("id") else {
+                continue;
+            };
+            if let Some(dialog) = dialogs.get(idx) {
+                map.insert(dom_id.to_string(), dialog.dialog_id.clone());
+            }
+            idx += 1;
+        }
+    }
+    map
+}
+
+fn resolve_dialog_id_from_target(
+    target: &str,
+    dialog_ids_by_dom_id: &BTreeMap<String, String>,
+) -> Option<String> {
+    let cleaned = target
+        .trim()
+        .trim_start_matches('#')
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if cleaned.is_empty() {
+        return None;
+    }
+    dialog_ids_by_dom_id.get(cleaned).cloned()
 }
 
 fn infer_node_kind(page: &ScannedPage, section_page_ids: &BTreeSet<String>) -> &'static str {
@@ -1435,6 +1629,25 @@ pub fn validate_document(doc: &Document) -> Result<(), Vec<ValidationError>> {
                 if !doc.nav.contains_key(nav_id) {
                     errors.push(ValidationError::new(format!(
                         "node `{node_id}` references unknown nav `{nav_id}`"
+                    )));
+                }
+            }
+        }
+        if let Some(AttrValue::Vector(dialog_ids)) = spec.attrs.get("opens") {
+            for dialog_id in dialog_ids {
+                let Some(dialog_spec) = doc.node.get(dialog_id) else {
+                    errors.push(ValidationError::new(format!(
+                        "node `{node_id}` references unknown dialog `{dialog_id}`"
+                    )));
+                    continue;
+                };
+                let dialog_kind = match dialog_spec.attrs.get("kind") {
+                    Some(AttrValue::Scalar(kind)) => kind.as_str(),
+                    _ => "",
+                };
+                if dialog_kind != "dialog" {
+                    errors.push(ValidationError::new(format!(
+                        "node `{node_id}` opens target `{dialog_id}` must be a dialog"
                     )));
                 }
             }
@@ -2187,6 +2400,8 @@ node:
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
             has_docs_index_candidate: false,
+            dialogs: Vec::new(),
+            opens: BTreeSet::new(),
         };
         let docs = ScannedPage {
             page_id: "Docs".to_string(),
@@ -2195,6 +2410,8 @@ node:
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
             has_docs_index_candidate: false,
+            dialogs: Vec::new(),
+            opens: BTreeSet::new(),
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -2203,6 +2420,8 @@ node:
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
             has_docs_index_candidate: false,
+            dialogs: Vec::new(),
+            opens: BTreeSet::new(),
         };
         let advanced = ScannedPage {
             page_id: "Advanced".to_string(),
@@ -2211,6 +2430,8 @@ node:
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
             has_docs_index_candidate: false,
+            dialogs: Vec::new(),
+            opens: BTreeSet::new(),
         };
 
         let drill = build_drill_section(&[home, docs, guide, advanced]);
@@ -2320,6 +2541,8 @@ node:
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
             has_docs_index_candidate: false,
+            dialogs: Vec::new(),
+            opens: BTreeSet::new(),
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -2328,6 +2551,8 @@ node:
             breadcrumb_paths: vec!["/docs".to_string(), "/docs/guide".to_string()],
             nav_candidates: Vec::new(),
             has_docs_index_candidate: false,
+            dialogs: Vec::new(),
+            opens: BTreeSet::new(),
         };
         let faq = ScannedPage {
             page_id: "Faq".to_string(),
@@ -2340,6 +2565,8 @@ node:
             ],
             nav_candidates: Vec::new(),
             has_docs_index_candidate: false,
+            dialogs: Vec::new(),
+            opens: BTreeSet::new(),
         };
 
         let drill = build_drill_section(&[root, guide, faq]);
@@ -2360,6 +2587,8 @@ node:
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: Vec::new(),
                 has_docs_index_candidate: false,
+                dialogs: Vec::new(),
+                opens: BTreeSet::new(),
             },
             ScannedPage {
                 page_id: "My".to_string(),
@@ -2368,6 +2597,8 @@ node:
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: Vec::new(),
                 has_docs_index_candidate: false,
+                dialogs: Vec::new(),
+                opens: BTreeSet::new(),
             },
             ScannedPage {
                 page_id: "MyOrders".to_string(),
@@ -2376,6 +2607,8 @@ node:
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: Vec::new(),
                 has_docs_index_candidate: false,
+                dialogs: Vec::new(),
+                opens: BTreeSet::new(),
             },
         ];
         let nav = BTreeMap::from([
@@ -2559,6 +2792,48 @@ node:
             _ => "",
         };
         assert_eq!(action_kind, "action");
+    }
+
+    #[test]
+    fn scan_extracts_dialog_nodes_and_opens_relation() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-dialog-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("dialog-home.html");
+        fs::write(
+            &home,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Checkout</title>
+    <link rel="canonical" href="https://example.test/checkout" />
+  </head>
+  <body>
+    <button aria-controls="coupon-modal" aria-haspopup="dialog">Open coupon</button>
+    <dialog id="coupon-modal" aria-label="Coupon modal">
+      <h2>Coupon modal</h2>
+      <button>Apply coupon</button>
+    </dialog>
+  </body>
+</html>"#,
+        )
+        .expect("write home");
+
+        let doc = scan_html_paths([&home]).expect("scan");
+        validate_document(&doc).expect("validate scan result");
+        let dialog_kind = match doc.node["CouponModalDialog"].attrs.get("kind") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        assert_eq!(dialog_kind, "dialog");
+        let opens = match doc.node["Checkout"].attrs.get("opens") {
+            Some(AttrValue::Vector(values)) => values,
+            _ => panic!("missing opens"),
+        };
+        assert!(opens.contains("CouponModalDialog"));
     }
 
     #[test]
