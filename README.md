@@ -78,6 +78,12 @@ foo:
 - `examples/`: sample `.gui` files
 - `spec/`: draft format specification
 
+## CLI
+
+```sh
+cargo run -- check examples/demo.gui
+```
+
 ## Status
 
 This repository currently contains an initial draft only.
