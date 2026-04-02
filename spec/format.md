@@ -59,6 +59,7 @@ node:
 - any node may define attributes.
 - `node.nav` is a set or ordered list of nav ids.
 - inherited attributes merge downward unless overridden by a child node.
+- attributes implied only by inheritance need not be restated on child nodes.
 - `groups` is optional and may overlap.
 
 ## Shorthand

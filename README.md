@@ -50,9 +50,6 @@ node:
   RootLayout:
     nav: [GlobalNav]
 
-  AdminShell:
-    nav: [GlobalNav]
-
   Home:
     path: /
 
