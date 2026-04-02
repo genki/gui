@@ -61,7 +61,31 @@ struct ScannedPage {
     page_id: String,
     title: String,
     path: String,
-    nav_candidates: Vec<BTreeSet<String>>,
+    nav_candidates: Vec<NavCandidate>,
+}
+
+#[derive(Debug, Clone)]
+struct NavCandidate {
+    label: Option<String>,
+    targets: Vec<ScannedTarget>,
+}
+
+#[derive(Debug, Clone)]
+struct ScannedTarget {
+    path: String,
+    title: String,
+}
+
+#[derive(Debug, Clone)]
+struct PageLocation {
+    path: String,
+    host: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct NavCluster {
+    owners: BTreeSet<String>,
+    label: Option<String>,
 }
 
 pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
@@ -103,7 +127,6 @@ where
     P: AsRef<Path>,
 {
     let mut raw_pages = Vec::new();
-    let mut canonical_paths = BTreeMap::new();
 
     for path in paths {
         let path_ref = path.as_ref();
@@ -113,10 +136,9 @@ where
         let input = String::from_utf8_lossy(&input).into_owned();
         let html = Html::parse_document(&input);
         let title = extract_title(&html).unwrap_or_else(|| infer_title_from_path(path_ref));
-        let page_id = make_identifier(&title, "Page");
-        let page_path = extract_canonical_path(&html).unwrap_or_else(|| infer_page_path(path_ref));
-        canonical_paths.insert(page_path.clone(), page_id.clone());
-        raw_pages.push((path_ref.to_path_buf(), page_id, title, page_path, html));
+        let location = extract_page_location(&html, path_ref);
+        let page_id = make_identifier_for_page(&title, &location.path, "Page");
+        raw_pages.push((page_id, title, location, html));
     }
 
     if raw_pages.is_empty() {
@@ -125,11 +147,11 @@ where
 
     let pages = raw_pages
         .into_iter()
-        .map(|(_path, page_id, title, path, html)| ScannedPage {
-            nav_candidates: extract_nav_candidates(&html, &canonical_paths),
+        .map(|(page_id, title, location, html)| ScannedPage {
+            nav_candidates: extract_nav_candidates(&html, location.host.as_deref()),
             page_id,
             title,
-            path,
+            path: location.path,
         })
         .collect::<Vec<_>>();
 
@@ -159,32 +181,83 @@ pub fn render_document(doc: &Document) -> String {
 }
 
 fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
-    let mut nav_clusters = BTreeMap::<BTreeSet<String>, Vec<String>>::new();
+    let mut used_ids = pages
+        .iter()
+        .map(|page| page.page_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut pages_by_path = pages
+        .iter()
+        .cloned()
+        .map(|page| (page.path.clone(), page))
+        .collect::<BTreeMap<_, _>>();
+
     for page in pages {
         for candidate in &page.nav_candidates {
-            if candidate.is_empty() {
+            for target in &candidate.targets {
+                pages_by_path.entry(target.path.clone()).or_insert_with(|| {
+                    let page_id = unique_page_id(&target.title, &target.path, &mut used_ids);
+                    ScannedPage {
+                        page_id,
+                        title: target.title.clone(),
+                        path: target.path.clone(),
+                        nav_candidates: Vec::new(),
+                    }
+                });
+            }
+        }
+    }
+
+    let scanned_pages = pages_by_path.values().cloned().collect::<Vec<_>>();
+    let page_id_by_path = pages_by_path
+        .iter()
+        .map(|(path, page)| (path.clone(), page.page_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let input_page_ids = pages
+        .iter()
+        .map(|page| page.page_id.clone())
+        .collect::<BTreeSet<_>>();
+    let input_page_count = input_page_ids.len();
+
+    let mut nav_clusters = BTreeMap::<BTreeSet<String>, NavCluster>::new();
+    for page in pages {
+        for candidate in &page.nav_candidates {
+            let targets = candidate
+                .targets
+                .iter()
+                .filter_map(|target| page_id_by_path.get(&target.path).cloned())
+                .collect::<BTreeSet<_>>();
+            if targets.len() < 2 {
                 continue;
             }
-            nav_clusters
-                .entry(candidate.clone())
-                .or_default()
-                .push(page.page_id.clone());
+            let cluster = nav_clusters.entry(targets).or_default();
+            cluster.owners.insert(page.page_id.clone());
+            if cluster.label.is_none() {
+                cluster.label = candidate.label.clone();
+            }
         }
     }
 
     let mut nav = BTreeMap::new();
     let mut nav_usage = BTreeMap::<String, BTreeSet<String>>::new();
     let mut next_nav_idx = 1;
-    for (targets, owners) in nav_clusters {
-        let nav_id = if owners.len() == pages.len() && pages.len() > 1 {
-            "GlobalNav".to_string()
+    for (targets, cluster) in nav_clusters {
+        let preferred_nav_id = if cluster.owners.len() == input_page_count && input_page_count > 1 {
+            Some("GlobalNav".to_string())
+        } else if input_page_count == 1 && targets.len() >= 3 {
+            Some(
+                cluster
+                    .label
+                    .as_deref()
+                    .and_then(suggest_nav_id)
+                    .unwrap_or_else(|| "GlobalNav".to_string()),
+            )
         } else {
-            let id = format!("Nav{next_nav_idx}");
-            next_nav_idx += 1;
-            id
+            cluster.label.as_deref().and_then(suggest_nav_id)
         };
+        let nav_id = allocate_nav_id(preferred_nav_id, &nav, &mut next_nav_idx);
         nav.insert(nav_id.clone(), targets);
-        for owner in owners {
+        for owner in cluster.owners {
             nav_usage.entry(owner).or_default().insert(nav_id.clone());
         }
     }
@@ -201,7 +274,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     }
     node.insert("RootLayout".to_string(), root_layout);
 
-    for page in pages {
+    for page in &scanned_pages {
         let mut attrs = BTreeMap::new();
         attrs.insert("title".to_string(), AttrValue::Scalar(page.title.clone()));
         attrs.insert("path".to_string(), AttrValue::Scalar(page.path.clone()));
@@ -218,10 +291,10 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         node.insert(page.page_id.clone(), NodeSpec { attrs });
     }
 
-    let drill = build_drill_section(pages);
+    let drill = build_drill_section(&scanned_pages);
     let inherit = BTreeMap::from([(
         "RootLayout".to_string(),
-        pages
+        scanned_pages
             .iter()
             .map(|page| TreeChild::Leaf(page.page_id.clone()))
             .collect::<Vec<_>>(),
@@ -245,23 +318,41 @@ fn extract_title(html: &Html) -> Option<String> {
         .filter(|title| !title.is_empty())
 }
 
-fn extract_canonical_path(html: &Html) -> Option<String> {
+fn extract_page_location(html: &Html, path: &Path) -> PageLocation {
+    if let Some(href) = extract_canonical_href(html) {
+        if let Ok(url) = Url::parse(&href) {
+            return PageLocation {
+                path: normalize_path(url.path()),
+                host: url.host_str().map(ToOwned::to_owned),
+            };
+        }
+        return PageLocation {
+            path: normalize_relative_href_to_path(&href).unwrap_or_else(|| infer_page_path(path)),
+            host: None,
+        };
+    }
+    PageLocation {
+        path: infer_page_path(path),
+        host: None,
+    }
+}
+
+fn extract_canonical_href(html: &Html) -> Option<String> {
     let canonical_selector = Selector::parse("link[rel=canonical]").expect("canonical selector");
     if let Some(href) = html
         .select(&canonical_selector)
         .next()
         .and_then(|node| node.value().attr("href"))
     {
-        return Some(normalize_href_to_path(href));
+        return Some(href.to_string());
     }
 
-    let og_selector = Selector::parse("meta[property='og:url'], meta[name='og:url']")
-        .expect("og:url selector");
-    let href = html
-        .select(&og_selector)
+    let og_selector =
+        Selector::parse("meta[property='og:url'], meta[name='og:url']").expect("og:url selector");
+    html.select(&og_selector)
         .next()
-        .and_then(|node| node.value().attr("content"))?;
-    Some(normalize_href_to_path(href))
+        .and_then(|node| node.value().attr("content"))
+        .map(ToOwned::to_owned)
 }
 
 fn infer_title_from_path(path: &Path) -> String {
@@ -284,46 +375,228 @@ fn infer_page_path(path: &Path) -> String {
     }
 }
 
-fn extract_nav_candidates(
-    html: &Html,
-    known_paths: &BTreeMap<String, String>,
-) -> Vec<BTreeSet<String>> {
-    let selectors = ["nav a[href]", "header a[href]", "footer a[href]"];
+fn extract_nav_candidates(html: &Html, page_host: Option<&str>) -> Vec<NavCandidate> {
+    let selectors = [
+        "nav",
+        "[role='navigation']",
+        "[role='tablist']",
+        "ul[id*='nav']",
+        "ol[id*='nav']",
+        "header",
+        "footer",
+    ];
     let mut candidates = Vec::new();
-    for selector in selectors {
-        let selector = Selector::parse(selector).expect("selector");
-        let mut targets = BTreeSet::new();
-        for link in html.select(&selector) {
-            if let Some(href) = link.value().attr("href") {
-                let path = normalize_href_to_path(href);
-                if let Some(page_id) = known_paths.get(&path) {
-                    targets.insert(page_id.clone());
-                }
+    for selector_text in selectors {
+        let selector = Selector::parse(selector_text).expect("selector");
+        let link_selector = Selector::parse("a[href]").expect("anchor selector");
+        for container in html.select(&selector) {
+            if matches!(selector_text, "header" | "footer")
+                && contains_nested_nav_container(&container)
+            {
+                continue;
+            }
+            let mut targets = BTreeMap::new();
+            for link in container.select(&link_selector) {
+                let Some(href) = link.value().attr("href") else {
+                    continue;
+                };
+                let Some(path) = normalize_internal_href_to_path(href, page_host) else {
+                    continue;
+                };
+                let title = extract_link_title(&link, &path);
+                targets
+                    .entry(path.clone())
+                    .or_insert(ScannedTarget { path, title });
+            }
+            if targets.len() < 2 {
+                continue;
+            }
+            let candidate = NavCandidate {
+                label: extract_container_label(&container),
+                targets: targets.into_values().collect(),
+            };
+            if !candidate.targets.is_empty() {
+                candidates.push(candidate);
             }
         }
-        if !targets.is_empty() {
-            candidates.push(targets);
-        }
     }
-    candidates.sort();
-    candidates.dedup();
+    candidates.sort_by(|left, right| {
+        left.targets
+            .iter()
+            .map(|target| target.path.as_str())
+            .collect::<Vec<_>>()
+            .cmp(
+                &right
+                    .targets
+                    .iter()
+                    .map(|target| target.path.as_str())
+                    .collect::<Vec<_>>(),
+            )
+    });
+    candidates.dedup_by(|left, right| {
+        left.targets
+            .iter()
+            .map(|target| target.path.as_str())
+            .eq(right.targets.iter().map(|target| target.path.as_str()))
+    });
     candidates
 }
 
-fn normalize_href_to_path(href: &str) -> String {
-    if let Ok(url) = Url::parse(href) {
-        normalize_path(url.path())
+fn normalize_internal_href_to_path(href: &str, page_host: Option<&str>) -> Option<String> {
+    let trimmed = href.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("javascript:")
+        || trimmed.starts_with("mailto:")
+        || trimmed.starts_with("tel:")
+    {
+        return None;
+    }
+
+    if let Ok(url) = Url::parse(trimmed) {
+        if let Some(page_host) = page_host {
+            if url.host_str() != Some(page_host) {
+                return None;
+            }
+        }
+        return Some(normalize_path(url.path()));
+    }
+
+    normalize_relative_href_to_path(trimmed)
+}
+
+fn normalize_relative_href_to_path(href: &str) -> Option<String> {
+    let path = href.split('#').next().unwrap_or(href);
+    let path = path.split('?').next().unwrap_or(path).trim();
+    if path.is_empty() || path == "." || path.starts_with("//") {
+        return None;
+    }
+    Some(if path.starts_with('/') {
+        normalize_path(path)
     } else {
-        let path = href.split('#').next().unwrap_or(href);
-        let path = path.split('?').next().unwrap_or(path);
-        if path.is_empty() {
-            "/".to_string()
-        } else if path.starts_with('/') {
-            normalize_path(path)
-        } else {
-            normalize_path(&format!("/{path}"))
+        normalize_path(&format!("/{path}"))
+    })
+}
+
+fn extract_container_label(element: &scraper::ElementRef<'_>) -> Option<String> {
+    for attr in ["aria-label", "id", "data-testid"] {
+        if let Some(value) = element
+            .value()
+            .attr(attr)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
         }
     }
+    element
+        .value()
+        .attr("class")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_link_title(link: &scraper::ElementRef<'_>, path: &str) -> String {
+    let text = collapse_text(link.text().collect::<String>());
+    if !text.is_empty() {
+        return text;
+    }
+    for attr in ["aria-label", "title", "alt"] {
+        if let Some(value) = link
+            .value()
+            .attr(attr)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return value.to_string();
+        }
+    }
+    infer_title_from_route(path)
+}
+
+fn contains_nested_nav_container(element: &scraper::ElementRef<'_>) -> bool {
+    let selector =
+        Selector::parse("nav, [role='navigation'], [role='tablist'], ul[id*='nav'], ol[id*='nav']")
+            .expect("nested nav selector");
+    element.select(&selector).next().is_some()
+}
+
+fn infer_title_from_route(path: &str) -> String {
+    if path == "/" {
+        return "Home".to_string();
+    }
+    path.trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.replace(['-', '_', '.'], " "))
+        .map(|segment| {
+            let mut chars = segment.chars();
+            let mut out = String::new();
+            if let Some(first) = chars.next() {
+                out.extend(first.to_uppercase());
+            }
+            out.push_str(chars.as_str());
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn suggest_nav_id(label: &str) -> Option<String> {
+    let lowered = label.to_ascii_lowercase();
+    if lowered.contains("footer") {
+        Some("FooterNav".to_string())
+    } else if lowered.contains("header") || lowered.contains("global") || lowered.contains("tab") {
+        Some("GlobalNav".to_string())
+    } else {
+        None
+    }
+}
+
+fn allocate_nav_id(
+    preferred: Option<String>,
+    nav: &BTreeMap<String, BTreeSet<String>>,
+    next_nav_idx: &mut usize,
+) -> String {
+    if let Some(preferred) = preferred {
+        if !nav.contains_key(&preferred) {
+            return preferred;
+        }
+    }
+    loop {
+        let candidate = format!("Nav{next_nav_idx}");
+        *next_nav_idx += 1;
+        if !nav.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+}
+
+fn unique_page_id(title: &str, path: &str, used_ids: &mut BTreeSet<String>) -> String {
+    let base = make_identifier_for_page(title, path, "Page");
+    if used_ids.insert(base.clone()) {
+        return base;
+    }
+    for index in 2.. {
+        let candidate = format!("{base}{index}");
+        if used_ids.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn make_identifier_for_page(input: &str, path: &str, fallback: &str) -> String {
+    let from_title = make_identifier(input, "");
+    if !from_title.is_empty() {
+        return from_title;
+    }
+    let from_path = make_identifier(&infer_title_from_route(path), "");
+    if !from_path.is_empty() {
+        return from_path;
+    }
+    fallback.to_string()
 }
 
 fn normalize_path(path: &str) -> String {
@@ -1280,5 +1553,50 @@ node:
         let rendered = render_document(&doc);
         let reparsed = parse_document(&rendered).expect("reparse rendered");
         validate_document(&reparsed).expect("revalidate rendered");
+    }
+
+    #[test]
+    fn scans_single_complex_html_into_page_stubs_and_nav() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-complex-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("complex-home.html");
+        fs::write(
+            &home,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Example Shop</title>
+    <link rel="canonical" href="https://shop.example.test/" />
+  </head>
+  <body>
+    <header>
+      <div role="tablist" aria-label="category tabs">
+        <a href="https://shop.example.test/">Home</a>
+        <a href="https://shop.example.test/category/fashion">Fashion</a>
+        <a href="https://shop.example.test/category/cosme">Cosme</a>
+        <a href="https://shop.example.test/ranking">Ranking</a>
+      </div>
+      <div>
+        <a href="https://external.example.test/help">Help</a>
+      </div>
+    </header>
+    <main><h1>Example Shop</h1></main>
+  </body>
+</html>"#,
+        )
+        .expect("write home");
+
+        let doc = scan_html_paths([&home]).expect("scan");
+        validate_document(&doc).expect("validate scan result");
+        assert!(doc.nav.contains_key("GlobalNav"));
+        assert!(doc.node.contains_key("ExampleShop"));
+        assert!(doc.node.contains_key("Fashion"));
+        assert!(doc.node.contains_key("Cosme"));
+        assert!(doc.node.contains_key("Ranking"));
+        assert_eq!(doc.nav["GlobalNav"].len(), 4);
     }
 }

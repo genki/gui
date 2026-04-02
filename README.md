@@ -120,6 +120,8 @@ gui scan page1.html page2.html
 - `node`: `node` セクションのキー一覧
 - `nav`: `nav` セクションのキー一覧
 - `scan`: rendered HTML files を解析して `.gui` を stdout に出力
+  - 高信頼の `nav` / `tablist` / `header` / `footer` から内部リンクを拾い、
+    入力HTMLに無い page も stub として補完する
 
 `scan` は HTML の取得や JavaScript 実行を行いません。入力は別ツールで保存した
 rendered HTML を想定します。設計メモは `spec/scan.md` にあります。
