@@ -127,7 +127,7 @@ gui scan page1.html page2.html
   - locale switcher、巨大 footer directory、巨大 docs index は nav/page 候補から抑制する
   - link cluster の path 傾向から `CategoryNav` / `AccountNav` / `FooterNav` を推定する
   - 近似した nav cluster は統合し、重複気味の nav を減らす
-  - 出力 `node` には `kind: page|section|layout` を付け、抽象化後の役割を明示する
+  - 出力 `node` には `kind: page|section|layout|action|index` を付け、抽象化後の役割を明示する
   - breadcrumb がある場合は `drill` の親推定で path prefix より優先して使う
   - 複数ページで共有される non-root nav target 群は `AccountLayout` などの部分 layout 推定に使う
 

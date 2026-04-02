@@ -63,6 +63,7 @@ struct ScannedPage {
     path: String,
     breadcrumb_paths: Vec<String>,
     nav_candidates: Vec<NavCandidate>,
+    has_docs_index_candidate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +164,11 @@ where
         .map(|(page_id, title, location, html)| ScannedPage {
             breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
             nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path),
+            has_docs_index_candidate: has_large_docs_index_candidate(
+                &html,
+                location.host.as_deref(),
+                &location.path,
+            ),
             page_id,
             title,
             path: location.path,
@@ -216,6 +222,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
                         path: target.path.clone(),
                         breadcrumb_paths: Vec::new(),
                         nav_candidates: Vec::new(),
+                        has_docs_index_candidate: false,
                     }
                 });
             }
@@ -309,11 +316,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
 
     for page in &scanned_pages {
         let mut attrs = BTreeMap::new();
-        let kind = if section_page_ids.contains(&page.page_id) {
-            "section"
-        } else {
-            "page"
-        };
+        let kind = infer_node_kind(page, &section_page_ids);
         attrs.insert("kind".to_string(), AttrValue::Scalar(kind.to_string()));
         attrs.insert("title".to_string(), AttrValue::Scalar(page.title.clone()));
         attrs.insert("path".to_string(), AttrValue::Scalar(page.path.clone()));
@@ -400,7 +403,11 @@ fn infer_page_path(path: &Path) -> String {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("page");
-    if stem.eq_ignore_ascii_case("index") {
+    if stem.eq_ignore_ascii_case("index")
+        || stem.eq_ignore_ascii_case("home")
+        || stem.ends_with("-home")
+        || stem.ends_with("_home")
+    {
         "/".to_string()
     } else {
         format!("/{}", stem.replace([' ', '_'], "-").to_ascii_lowercase())
@@ -780,6 +787,88 @@ fn is_docs_index_candidate(candidate: &NavCandidate, page_path: &str) -> bool {
             .count();
         matching * 4 >= candidate.targets.len() * 3
     })
+}
+
+fn has_large_docs_index_candidate(html: &Html, page_host: Option<&str>, page_path: &str) -> bool {
+    let selectors = [
+        "nav",
+        "[role='navigation']",
+        "[role='tablist']",
+        "ul[id*='nav']",
+        "ol[id*='nav']",
+    ];
+    let link_selector = Selector::parse("a[href]").expect("anchor selector");
+    for selector_text in selectors {
+        let selector = Selector::parse(selector_text).expect("selector");
+        for container in html.select(&selector) {
+            let mut targets = BTreeMap::new();
+            for link in container.select(&link_selector) {
+                let Some(href) = link.value().attr("href") else {
+                    continue;
+                };
+                let Some(path) = normalize_internal_href_to_path(href, page_host) else {
+                    continue;
+                };
+                let title = extract_link_title(&link, &path);
+                targets
+                    .entry(path.clone())
+                    .or_insert(ScannedTarget { path, title });
+            }
+            let candidate = NavCandidate {
+                label: extract_container_label(&container),
+                targets: targets.into_values().collect(),
+            };
+            if is_docs_index_candidate(&candidate, page_path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn infer_node_kind(page: &ScannedPage, section_page_ids: &BTreeSet<String>) -> &'static str {
+    if section_page_ids.contains(&page.page_id) {
+        return "section";
+    }
+    if is_probably_action_node(&page.path, &page.title) {
+        return "action";
+    }
+    if page.has_docs_index_candidate {
+        return "index";
+    }
+    "page"
+}
+
+fn is_probably_action_node(path: &str, title: &str) -> bool {
+    let lowered_path = path.to_ascii_lowercase();
+    let lowered_title = title.to_ascii_lowercase();
+    let action_fragments = [
+        "/contact/sales",
+        "/contact",
+        "/demo",
+        "/start",
+        "/signup",
+        "/register",
+    ];
+    if action_fragments
+        .iter()
+        .any(|fragment| lowered_path.contains(fragment))
+    {
+        return true;
+    }
+    let action_titles = [
+        "contact sales",
+        "contact us",
+        "get started",
+        "start now",
+        "book a demo",
+        "営業にお問い合わせ",
+        "お問い合わせ",
+        "今すぐ始める",
+    ];
+    action_titles
+        .iter()
+        .any(|fragment| lowered_title.contains(&fragment.to_ascii_lowercase()))
 }
 
 fn suggest_nav_id(label: &str) -> Option<String> {
@@ -1861,11 +1950,12 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         fs,
+        path::Path,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        build_drill_section, infer_layout_groups, load_document_from_path,
+        build_drill_section, infer_layout_groups, infer_page_path, load_document_from_path,
         load_documents_from_paths, parse_document, prune_redundant_nav_clusters, render_document,
         scan_html_paths, validate_document, AttrValue, NavCluster, ScannedPage, TreeChild,
     };
@@ -2096,6 +2186,7 @@ node:
             path: "/".to_string(),
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
+            has_docs_index_candidate: false,
         };
         let docs = ScannedPage {
             page_id: "Docs".to_string(),
@@ -2103,6 +2194,7 @@ node:
             path: "/docs".to_string(),
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
+            has_docs_index_candidate: false,
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -2110,6 +2202,7 @@ node:
             path: "/docs/guide".to_string(),
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
+            has_docs_index_candidate: false,
         };
         let advanced = ScannedPage {
             page_id: "Advanced".to_string(),
@@ -2117,6 +2210,7 @@ node:
             path: "/docs/category/advanced".to_string(),
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
+            has_docs_index_candidate: false,
         };
 
         let drill = build_drill_section(&[home, docs, guide, advanced]);
@@ -2225,6 +2319,7 @@ node:
             path: "/docs".to_string(),
             breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
+            has_docs_index_candidate: false,
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
@@ -2232,6 +2327,7 @@ node:
             path: "/docs/guide".to_string(),
             breadcrumb_paths: vec!["/docs".to_string(), "/docs/guide".to_string()],
             nav_candidates: Vec::new(),
+            has_docs_index_candidate: false,
         };
         let faq = ScannedPage {
             page_id: "Faq".to_string(),
@@ -2243,6 +2339,7 @@ node:
                 "/docs/guide/faq".to_string(),
             ],
             nav_candidates: Vec::new(),
+            has_docs_index_candidate: false,
         };
 
         let drill = build_drill_section(&[root, guide, faq]);
@@ -2262,6 +2359,7 @@ node:
                 path: "/".to_string(),
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: Vec::new(),
+                has_docs_index_candidate: false,
             },
             ScannedPage {
                 page_id: "My".to_string(),
@@ -2269,6 +2367,7 @@ node:
                 path: "/my".to_string(),
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: Vec::new(),
+                has_docs_index_candidate: false,
             },
             ScannedPage {
                 page_id: "MyOrders".to_string(),
@@ -2276,6 +2375,7 @@ node:
                 path: "/my/orders".to_string(),
                 breadcrumb_paths: Vec::new(),
                 nav_candidates: Vec::new(),
+                has_docs_index_candidate: false,
             },
         ];
         let nav = BTreeMap::from([
@@ -2416,6 +2516,55 @@ node:
         assert_eq!(doc.node.len(), 2);
         assert!(doc.node.contains_key("RootLayout"));
         assert!(doc.node.contains_key("Js"));
+        let js_kind = match doc.node["Js"].attrs.get("kind") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        assert_eq!(js_kind, "index");
+    }
+
+    #[test]
+    fn scan_marks_sales_cta_stub_as_action() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-sales-action-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("pricing-home.html");
+        fs::write(
+            &home,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Pricing</title>
+    <link rel="canonical" href="https://example.test/pricing" />
+  </head>
+  <body>
+    <header>
+      <nav>
+        <a href="https://example.test/pricing">Pricing</a>
+        <a href="https://example.test/contact/sales">Contact sales</a>
+        <a href="https://example.test/docs">Docs</a>
+      </nav>
+    </header>
+  </body>
+</html>"#,
+        )
+        .expect("write home");
+
+        let doc = scan_html_paths([&home]).expect("scan");
+        let action_kind = match doc.node["ContactSales"].attrs.get("kind") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        assert_eq!(action_kind, "action");
+    }
+
+    #[test]
+    fn infer_page_path_treats_home_stem_as_root() {
+        assert_eq!(infer_page_path(Path::new("rust-home.html")), "/");
+        assert_eq!(infer_page_path(Path::new("home.html")), "/");
     }
 
     #[test]
