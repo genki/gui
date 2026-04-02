@@ -5,7 +5,8 @@ use std::{
 };
 
 use abstract_gui::{
-    load_documents_from_paths, page_nodes, validate_document, Document, TreeChild, TreeSection,
+    load_documents_from_paths, page_nodes, render_document, scan_html_paths, validate_document,
+    Document, TreeChild, TreeSection,
 };
 
 fn main() {
@@ -17,14 +18,18 @@ fn main() {
     };
     if !matches!(
         command.as_str(),
-        "check" | "page" | "drill" | "inherit" | "node" | "nav"
+        "check" | "page" | "drill" | "inherit" | "node" | "nav" | "scan"
     ) {
         eprintln!("unknown command: {command}");
         print_usage(&program);
         process::exit(2);
     }
-    let paths = args.collect::<Vec<_>>();
-    let paths = match resolve_input_paths(paths) {
+    let raw_paths = args.collect::<Vec<_>>();
+    let paths = match if command == "scan" {
+        resolve_scan_input_paths(raw_paths)
+    } else {
+        resolve_input_paths(raw_paths)
+    } {
         Ok(paths) => paths,
         Err(message) => {
             eprintln!("{message}");
@@ -73,6 +78,22 @@ fn main() {
                 println!("{nav_id}");
             }
         }
+        "scan" => {
+            let doc = match scan_html_paths(paths.iter()) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    eprintln!("scan error: {}", err.message);
+                    process::exit(1);
+                }
+            };
+            if let Err(errors) = validate_document(&doc) {
+                for err in errors {
+                    eprintln!("validation error: {}", err.message);
+                }
+                process::exit(1);
+            }
+            print!("{}", render_document(&doc));
+        }
         _ => unreachable!(),
     }
 }
@@ -84,6 +105,7 @@ fn print_usage(program: &str) {
     eprintln!("       {program} inherit [file.gui ...]");
     eprintln!("       {program} node [file.gui ...]");
     eprintln!("       {program} nav [file.gui ...]");
+    eprintln!("       {program} scan <file.html> [more.html ...]");
 }
 
 fn load_and_validate(paths: &[PathBuf]) -> Document {
@@ -151,4 +173,11 @@ fn collect_gui_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), std::io::
         }
     }
     Ok(())
+}
+
+fn resolve_scan_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
+    if paths.is_empty() {
+        return Err("scan requires at least one html file".to_string());
+    }
+    Ok(paths.into_iter().map(PathBuf::from).collect())
 }

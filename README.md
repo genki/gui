@@ -107,6 +107,7 @@ gui drill
 gui inherit
 gui node
 gui nav
+gui scan page1.html page2.html
 ```
 
 引数を省略した場合は、実行ディレクトリ配下を再帰走査して見つかったすべての
@@ -118,6 +119,10 @@ gui nav
 - `inherit`: `inherit` 木を indent 付きで表示
 - `node`: `node` セクションのキー一覧
 - `nav`: `nav` セクションのキー一覧
+- `scan`: rendered HTML files を解析して `.gui` を stdout に出力
+
+`scan` は HTML の取得や JavaScript 実行を行いません。入力は別ツールで保存した
+rendered HTML を想定します。設計メモは `spec/scan.md` にあります。
 
 ## Status
 

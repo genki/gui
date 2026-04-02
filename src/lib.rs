@@ -4,7 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use scraper::{Html, Selector};
 use serde_yaml::{Mapping, Value};
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct Document {
@@ -54,6 +56,14 @@ impl ValidationError {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ScannedPage {
+    page_id: String,
+    title: String,
+    path: String,
+    nav_candidates: Vec<BTreeSet<String>>,
+}
+
 pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
     let mut stack = Vec::new();
     load_document_from_path_inner(path.as_ref(), &mut stack)
@@ -85,6 +95,436 @@ where
     }
 
     Ok(merged)
+}
+
+pub fn scan_html_paths<I, P>(paths: I) -> Result<Document, ValidationError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut raw_pages = Vec::new();
+    let mut canonical_paths = BTreeMap::new();
+
+    for path in paths {
+        let path_ref = path.as_ref();
+        let input = fs::read(path_ref).map_err(|err| {
+            ValidationError::new(format!("failed to read `{}`: {err}", path_ref.display()))
+        })?;
+        let input = String::from_utf8_lossy(&input).into_owned();
+        let html = Html::parse_document(&input);
+        let title = extract_title(&html).unwrap_or_else(|| infer_title_from_path(path_ref));
+        let page_id = make_identifier(&title, "Page");
+        let page_path = extract_canonical_path(&html).unwrap_or_else(|| infer_page_path(path_ref));
+        canonical_paths.insert(page_path.clone(), page_id.clone());
+        raw_pages.push((path_ref.to_path_buf(), page_id, title, page_path, html));
+    }
+
+    if raw_pages.is_empty() {
+        return Err(ValidationError::new("no html files matched input"));
+    }
+
+    let pages = raw_pages
+        .into_iter()
+        .map(|(_path, page_id, title, path, html)| ScannedPage {
+            nav_candidates: extract_nav_candidates(&html, &canonical_paths),
+            page_id,
+            title,
+            path,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(document_from_scanned_pages(&pages))
+}
+
+pub fn render_document(doc: &Document) -> String {
+    let mut out = String::new();
+    if let Some(app) = &doc.app {
+        out.push_str("app: ");
+        out.push_str(&yaml_scalar(app));
+        out.push('\n');
+        out.push('\n');
+    }
+    render_tree_section(&mut out, "drill", &doc.drill);
+    out.push('\n');
+    render_tree_section(&mut out, "inherit", &doc.inherit);
+    out.push('\n');
+    render_nav_section(&mut out, &doc.nav);
+    out.push('\n');
+    render_node_section(&mut out, &doc.node);
+    if !doc.groups.is_empty() {
+        out.push('\n');
+        render_groups_section(&mut out, &doc.groups);
+    }
+    out
+}
+
+fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
+    let mut nav_clusters = BTreeMap::<BTreeSet<String>, Vec<String>>::new();
+    for page in pages {
+        for candidate in &page.nav_candidates {
+            if candidate.is_empty() {
+                continue;
+            }
+            nav_clusters
+                .entry(candidate.clone())
+                .or_default()
+                .push(page.page_id.clone());
+        }
+    }
+
+    let mut nav = BTreeMap::new();
+    let mut nav_usage = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut next_nav_idx = 1;
+    for (targets, owners) in nav_clusters {
+        let nav_id = if owners.len() == pages.len() && pages.len() > 1 {
+            "GlobalNav".to_string()
+        } else {
+            let id = format!("Nav{next_nav_idx}");
+            next_nav_idx += 1;
+            id
+        };
+        nav.insert(nav_id.clone(), targets);
+        for owner in owners {
+            nav_usage.entry(owner).or_default().insert(nav_id.clone());
+        }
+    }
+
+    let mut node = BTreeMap::new();
+    let mut root_layout = NodeSpec::default();
+    if let Some(global_nav_targets) = nav.get("GlobalNav") {
+        if !global_nav_targets.is_empty() {
+            root_layout.attrs.insert(
+                "nav".to_string(),
+                AttrValue::Vector(BTreeSet::from(["GlobalNav".to_string()])),
+            );
+        }
+    }
+    node.insert("RootLayout".to_string(), root_layout);
+
+    for page in pages {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("title".to_string(), AttrValue::Scalar(page.title.clone()));
+        attrs.insert("path".to_string(), AttrValue::Scalar(page.path.clone()));
+        if let Some(nav_ids) = nav_usage.get(&page.page_id) {
+            let filtered = nav_ids
+                .iter()
+                .filter(|nav_id| nav_id.as_str() != "GlobalNav")
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !filtered.is_empty() {
+                attrs.insert("nav".to_string(), AttrValue::Vector(filtered));
+            }
+        }
+        node.insert(page.page_id.clone(), NodeSpec { attrs });
+    }
+
+    let drill = build_drill_section(pages);
+    let inherit = BTreeMap::from([(
+        "RootLayout".to_string(),
+        pages
+            .iter()
+            .map(|page| TreeChild::Leaf(page.page_id.clone()))
+            .collect::<Vec<_>>(),
+    )]);
+
+    Document {
+        app: None,
+        drill,
+        inherit,
+        nav,
+        node,
+        groups: Vec::new(),
+    }
+}
+
+fn extract_title(html: &Html) -> Option<String> {
+    let title_selector = Selector::parse("title").expect("title selector");
+    html.select(&title_selector)
+        .next()
+        .map(|title| collapse_text(title.text().collect::<String>()))
+        .filter(|title| !title.is_empty())
+}
+
+fn extract_canonical_path(html: &Html) -> Option<String> {
+    let canonical_selector = Selector::parse("link[rel=canonical]").expect("canonical selector");
+    if let Some(href) = html
+        .select(&canonical_selector)
+        .next()
+        .and_then(|node| node.value().attr("href"))
+    {
+        return Some(normalize_href_to_path(href));
+    }
+
+    let og_selector = Selector::parse("meta[property='og:url'], meta[name='og:url']")
+        .expect("og:url selector");
+    let href = html
+        .select(&og_selector)
+        .next()
+        .and_then(|node| node.value().attr("content"))?;
+    Some(normalize_href_to_path(href))
+}
+
+fn infer_title_from_path(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Page");
+    stem.replace(['-', '_', '.'], " ")
+}
+
+fn infer_page_path(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("page");
+    if stem.eq_ignore_ascii_case("index") {
+        "/".to_string()
+    } else {
+        format!("/{}", stem.replace([' ', '_'], "-").to_ascii_lowercase())
+    }
+}
+
+fn extract_nav_candidates(
+    html: &Html,
+    known_paths: &BTreeMap<String, String>,
+) -> Vec<BTreeSet<String>> {
+    let selectors = ["nav a[href]", "header a[href]", "footer a[href]"];
+    let mut candidates = Vec::new();
+    for selector in selectors {
+        let selector = Selector::parse(selector).expect("selector");
+        let mut targets = BTreeSet::new();
+        for link in html.select(&selector) {
+            if let Some(href) = link.value().attr("href") {
+                let path = normalize_href_to_path(href);
+                if let Some(page_id) = known_paths.get(&path) {
+                    targets.insert(page_id.clone());
+                }
+            }
+        }
+        if !targets.is_empty() {
+            candidates.push(targets);
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn normalize_href_to_path(href: &str) -> String {
+    if let Ok(url) = Url::parse(href) {
+        normalize_path(url.path())
+    } else {
+        let path = href.split('#').next().unwrap_or(href);
+        let path = path.split('?').next().unwrap_or(path);
+        if path.is_empty() {
+            "/".to_string()
+        } else if path.starts_with('/') {
+            normalize_path(path)
+        } else {
+            normalize_path(&format!("/{path}"))
+        }
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn collapse_text(text: String) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn make_identifier(input: &str, fallback: &str) -> String {
+    let parts = input
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            let mut out = String::new();
+            if let Some(first) = chars.next() {
+                out.push(first.to_ascii_uppercase());
+            }
+            out.push_str(&chars.as_str().to_ascii_lowercase());
+            out
+        })
+        .collect::<String>();
+    if parts.is_empty() {
+        fallback.to_string()
+    } else if parts.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        format!("N{parts}")
+    } else {
+        parts
+    }
+}
+
+fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
+    let mut parent_by_id = BTreeMap::<String, Option<String>>::new();
+    for page in pages {
+        let segments = split_path_segments(&page.path);
+        let mut best_parent = None;
+        let mut best_len = 0usize;
+        for candidate in pages {
+            if candidate.page_id == page.page_id {
+                continue;
+            }
+            let candidate_segments = split_path_segments(&candidate.path);
+            if candidate_segments.len() >= segments.len() {
+                continue;
+            }
+            if segments.starts_with(&candidate_segments) && candidate_segments.len() > best_len {
+                best_len = candidate_segments.len();
+                best_parent = Some(candidate.page_id.clone());
+            }
+        }
+        parent_by_id.insert(page.page_id.clone(), best_parent);
+    }
+
+    let mut children_by_parent = BTreeMap::<String, Vec<String>>::new();
+    let mut roots = Vec::new();
+    for page in pages {
+        match parent_by_id
+            .get(&page.page_id)
+            .and_then(|parent| parent.clone())
+        {
+            Some(parent) => children_by_parent
+                .entry(parent)
+                .or_default()
+                .push(page.page_id.clone()),
+            None => roots.push(page.page_id.clone()),
+        }
+    }
+
+    let pages_by_id = pages
+        .iter()
+        .map(|page| (page.page_id.clone(), page))
+        .collect::<BTreeMap<_, _>>();
+
+    roots.sort_by_key(|page_id| pages_by_id.get(page_id).map(|page| page.path.clone()));
+    let mut section = BTreeMap::new();
+    for root in roots {
+        section.insert(
+            root.clone(),
+            build_drill_children(&root, &children_by_parent, &pages_by_id),
+        );
+    }
+    section
+}
+
+fn build_drill_children(
+    page_id: &str,
+    children_by_parent: &BTreeMap<String, Vec<String>>,
+    pages_by_id: &BTreeMap<String, &ScannedPage>,
+) -> Vec<TreeChild> {
+    let mut children = children_by_parent.get(page_id).cloned().unwrap_or_default();
+    children.sort_by_key(|child| pages_by_id.get(child).map(|page| page.path.clone()));
+    children
+        .into_iter()
+        .map(|child| {
+            let nested = build_drill_children(&child, children_by_parent, pages_by_id);
+            if nested.is_empty() {
+                TreeChild::Leaf(child)
+            } else {
+                TreeChild::Branch(child, nested)
+            }
+        })
+        .collect()
+}
+
+fn split_path_segments(path: &str) -> Vec<&str> {
+    path.trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn render_tree_section(out: &mut String, section_name: &str, section: &TreeSection) {
+    out.push_str(section_name);
+    out.push_str(":\n");
+    for (root, children) in section {
+        render_tree_entry(out, 1, root, children);
+    }
+}
+
+fn render_tree_entry(out: &mut String, depth: usize, node_id: &str, children: &[TreeChild]) {
+    let indent = "  ".repeat(depth);
+    out.push_str(&indent);
+    out.push_str(node_id);
+    out.push_str(":\n");
+    for child in children {
+        match child {
+            TreeChild::Leaf(id) => render_tree_entry(out, depth + 1, id, &[]),
+            TreeChild::Branch(id, nested) => render_tree_entry(out, depth + 1, id, nested),
+        }
+    }
+}
+
+fn render_nav_section(out: &mut String, nav: &BTreeMap<String, BTreeSet<String>>) {
+    if nav.is_empty() {
+        out.push_str("nav: {}\n");
+        return;
+    }
+    out.push_str("nav:\n");
+    for (nav_id, targets) in nav {
+        out.push_str("  ");
+        out.push_str(nav_id);
+        out.push_str(":\n");
+        for target in targets {
+            out.push_str("    - ");
+            out.push_str(target);
+            out.push('\n');
+        }
+    }
+}
+
+fn render_node_section(out: &mut String, node: &BTreeMap<String, NodeSpec>) {
+    out.push_str("node:\n");
+    for (node_id, spec) in node {
+        out.push_str("  ");
+        out.push_str(node_id);
+        out.push_str(":\n");
+        for (attr_name, attr_value) in &spec.attrs {
+            out.push_str("    ");
+            out.push_str(attr_name);
+            out.push_str(": ");
+            match attr_value {
+                AttrValue::Scalar(value) => out.push_str(&yaml_scalar(value)),
+                AttrValue::Vector(values) => {
+                    out.push('[');
+                    out.push_str(&values.iter().cloned().collect::<Vec<_>>().join(", "));
+                    out.push(']');
+                }
+            }
+            out.push('\n');
+        }
+    }
+}
+
+fn render_groups_section(out: &mut String, groups: &[GroupSpec]) {
+    out.push_str("groups:\n");
+    for group in groups {
+        out.push_str("  - id: ");
+        out.push_str(&yaml_scalar(&group.id));
+        out.push('\n');
+        out.push_str("    members: [");
+        out.push_str(&group.members.iter().cloned().collect::<Vec<_>>().join(", "));
+        out.push_str("]\n");
+    }
+}
+
+fn yaml_scalar(value: &str) -> String {
+    serde_yaml::to_string(&Value::String(value.to_string()))
+        .expect("yaml string")
+        .trim()
+        .to_string()
 }
 
 pub fn parse_document(input: &str) -> Result<Document, ValidationError> {
@@ -666,7 +1106,8 @@ mod tests {
     };
 
     use super::{
-        load_document_from_path, load_documents_from_paths, parse_document, validate_document,
+        load_document_from_path, load_documents_from_paths, parse_document, render_document,
+        scan_html_paths, validate_document,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -777,5 +1218,67 @@ node:
         validate_document(&doc).expect("validate merged");
         assert!(doc.drill.contains_key("Home"));
         assert!(doc.drill.contains_key("AdminRoot"));
+    }
+
+    #[test]
+    fn scans_html_pages_into_gui_document() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("home.html");
+        let products = dir.join("products.html");
+        fs::write(
+            &home,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Home</title>
+    <link rel="canonical" href="https://example.test/" />
+  </head>
+  <body>
+    <header>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/products">Products</a>
+      </nav>
+    </header>
+    <main><h1>Home</h1></main>
+  </body>
+</html>"#,
+        )
+        .expect("write home");
+        fs::write(
+            &products,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Products</title>
+    <link rel="canonical" href="https://example.test/products" />
+  </head>
+  <body>
+    <header>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/products">Products</a>
+      </nav>
+    </header>
+    <main><h1>Products</h1></main>
+  </body>
+</html>"#,
+        )
+        .expect("write products");
+
+        let doc = scan_html_paths([&home, &products]).expect("scan");
+        validate_document(&doc).expect("validate scan result");
+        assert!(doc.nav.contains_key("GlobalNav"));
+        assert!(doc.node.contains_key("Home"));
+        assert!(doc.node.contains_key("Products"));
+
+        let rendered = render_document(&doc);
+        let reparsed = parse_document(&rendered).expect("reparse rendered");
+        validate_document(&reparsed).expect("revalidate rendered");
     }
 }

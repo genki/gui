@@ -11,5 +11,7 @@ name = "gui"
 path = "src/main.rs"
 
 [dependencies]
+scraper = "0.24"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+url = "2"
