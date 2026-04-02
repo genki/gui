@@ -18,8 +18,9 @@ inherit:
     - ProductDetail
     - ProductReviews
     - ProductRelated
-    - AdminRoot:
-        - AdminUsers
+    - AdminShell:
+        - AdminRoot:
+            - AdminUsers
 
 drill:
   Home:
