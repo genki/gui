@@ -150,7 +150,7 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    let mut raw_pages = Vec::new();
+    let mut scanned_pages = Vec::new();
 
     for path in paths {
         let path_ref = path.as_ref();
@@ -161,41 +161,141 @@ where
         let html = Html::parse_document(&input);
         let title = extract_title(&html).unwrap_or_else(|| infer_title_from_path(path_ref));
         let location = extract_page_location(&html, path_ref);
-        let page_id = make_identifier_for_page(&title, &location.path, "Page");
-        raw_pages.push((page_id, title, location, html));
+        let dialogs = extract_dialogs(&html, &title);
+        let opens = extract_dialog_opens(&html, &dialogs);
+        scanned_pages.push(ScannedPage {
+            breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
+            nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path),
+            has_docs_index_candidate: has_large_docs_index_candidate(
+                &html,
+                location.host.as_deref(),
+                &location.path,
+            ),
+            dialogs,
+            opens,
+            page_id: String::new(),
+            title,
+            path: location.path,
+        });
     }
 
-    if raw_pages.is_empty() {
+    if scanned_pages.is_empty() {
         return Err(ValidationError::new("no html files matched input"));
     }
 
-    let pages = raw_pages
-        .into_iter()
-        .map(|(page_id, title, location, html)| {
-            let dialogs = extract_dialogs(&html, &title);
-            let opens = extract_dialog_opens(&html, &dialogs);
-            ScannedPage {
-                breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
-                nav_candidates: extract_nav_candidates(
-                    &html,
-                    location.host.as_deref(),
-                    &location.path,
-                ),
-                has_docs_index_candidate: has_large_docs_index_candidate(
-                    &html,
-                    location.host.as_deref(),
-                    &location.path,
-                ),
-                dialogs,
-                opens,
-                page_id,
-                title,
-                path: location.path,
-            }
-        })
-        .collect::<Vec<_>>();
+    let pages = assign_page_ids(normalize_scanned_pages(scanned_pages));
 
     Ok(document_from_scanned_pages(&pages))
+}
+
+fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
+    let mut merged_by_path = BTreeMap::<String, ScannedPage>::new();
+    for mut page in pages {
+        page.path = normalize_logical_page_path(&page.path);
+        for breadcrumb in &mut page.breadcrumb_paths {
+            *breadcrumb = normalize_logical_page_path(breadcrumb);
+        }
+        if let Some(existing) = merged_by_path.get_mut(&page.path) {
+            merge_scanned_page(existing, page);
+        } else {
+            merged_by_path.insert(page.path.clone(), page);
+        }
+    }
+    merged_by_path.into_values().collect()
+}
+
+fn assign_page_ids(mut pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
+    let mut used_ids = BTreeSet::new();
+    for page in &mut pages {
+        page.page_id = unique_page_id(&page.title, &page.path, &mut used_ids);
+    }
+    pages
+}
+
+fn merge_scanned_page(into: &mut ScannedPage, from: ScannedPage) {
+    if should_prefer_title(&from.title, &into.title) {
+        into.title = from.title.clone();
+    }
+    if from.breadcrumb_paths.len() > into.breadcrumb_paths.len() {
+        into.breadcrumb_paths = from.breadcrumb_paths.clone();
+    }
+    into.has_docs_index_candidate |= from.has_docs_index_candidate;
+    into.opens.extend(from.opens);
+
+    let mut dialogs_by_id = into
+        .dialogs
+        .iter()
+        .cloned()
+        .map(|dialog| (dialog.dialog_id.clone(), dialog))
+        .collect::<BTreeMap<_, _>>();
+    for dialog in from.dialogs {
+        dialogs_by_id
+            .entry(dialog.dialog_id.clone())
+            .or_insert(dialog);
+    }
+    into.dialogs = dialogs_by_id.into_values().collect();
+
+    let mut nav_candidates = Vec::new();
+    nav_candidates.append(&mut into.nav_candidates);
+    nav_candidates.extend(from.nav_candidates);
+    into.nav_candidates = dedupe_nav_candidates(nav_candidates);
+}
+
+fn dedupe_nav_candidates(candidates: Vec<NavCandidate>) -> Vec<NavCandidate> {
+    let mut merged = BTreeMap::<BTreeSet<String>, NavCandidate>::new();
+    for mut candidate in candidates {
+        candidate
+            .targets
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        let key = candidate
+            .targets
+            .iter()
+            .map(|target| target.path.clone())
+            .collect::<BTreeSet<_>>();
+        if key.is_empty() {
+            continue;
+        }
+        match merged.get_mut(&key) {
+            Some(existing) => {
+                if existing.label.is_none() {
+                    existing.label = candidate.label;
+                }
+            }
+            None => {
+                merged.insert(key, candidate);
+            }
+        }
+    }
+    merged.into_values().collect()
+}
+
+fn should_prefer_title(candidate: &str, current: &str) -> bool {
+    score_scan_title(candidate) > score_scan_title(current)
+}
+
+fn score_scan_title(title: &str) -> usize {
+    let normalized = collapse_text(title.to_string());
+    let lowered = normalized.to_ascii_lowercase();
+    let generic_penalty = if matches!(lowered.as_str(), "home" | "index" | "page") {
+        100
+    } else {
+        0
+    };
+    normalized.len().saturating_sub(generic_penalty)
+}
+
+fn normalize_logical_page_path(path: &str) -> String {
+    let normalized = normalize_path(path);
+    if normalized == "/index" || normalized == "/home" {
+        return "/".to_string();
+    }
+    for suffix in ["/index", "/home"] {
+        if let Some(stripped) = normalized.strip_suffix(suffix) {
+            let candidate = if stripped.is_empty() { "/" } else { stripped };
+            return normalize_path(candidate);
+        }
+    }
+    normalized
 }
 
 pub fn render_document(doc: &Document) -> String {
@@ -427,7 +527,7 @@ fn extract_page_location(html: &Html, path: &Path) -> PageLocation {
     if let Some(href) = extract_canonical_href(html) {
         if let Ok(url) = Url::parse(&href) {
             return PageLocation {
-                path: normalize_path(url.path()),
+                path: normalize_logical_page_path(url.path()),
                 host: url.host_str().map(ToOwned::to_owned),
             };
         }
@@ -610,7 +710,7 @@ fn normalize_internal_href_to_path(href: &str, page_host: Option<&str>) -> Optio
         if url.host_str() != Some(page_host) {
             return None;
         }
-        return Some(normalize_path(url.path()));
+        return Some(normalize_logical_page_path(url.path()));
     }
 
     normalize_relative_href_to_path(trimmed)
@@ -623,9 +723,9 @@ fn normalize_relative_href_to_path(href: &str) -> Option<String> {
         return None;
     }
     Some(if path.starts_with('/') {
-        normalize_path(path)
+        normalize_logical_page_path(path)
     } else {
-        normalize_path(&format!("/{path}"))
+        normalize_logical_page_path(&format!("/{path}"))
     })
 }
 
@@ -2288,8 +2388,10 @@ mod tests {
 
     use super::{
         build_drill_section, infer_layout_groups, infer_page_path, load_document_from_path,
-        load_documents_from_paths, parse_document, prune_redundant_nav_clusters, render_document,
-        scan_html_paths, validate_document, AttrValue, NavCluster, ScannedPage, TreeChild,
+        load_documents_from_paths, normalize_logical_page_path, normalize_scanned_pages,
+        parse_document, prune_redundant_nav_clusters, render_document, scan_html_paths,
+        validate_document, AttrValue, NavCandidate, NavCluster, ScannedPage, ScannedTarget,
+        TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -3015,6 +3117,62 @@ node:
     fn infer_page_path_treats_home_stem_as_root() {
         assert_eq!(infer_page_path(Path::new("rust-home.html")), "/");
         assert_eq!(infer_page_path(Path::new("home.html")), "/");
+    }
+
+    #[test]
+    fn normalize_logical_page_path_collapses_home_aliases() {
+        assert_eq!(normalize_logical_page_path("/"), "/");
+        assert_eq!(normalize_logical_page_path("/index"), "/");
+        assert_eq!(normalize_logical_page_path("/home"), "/");
+        assert_eq!(normalize_logical_page_path("/docs/index"), "/docs");
+        assert_eq!(normalize_logical_page_path("/docs/home"), "/docs");
+    }
+
+    #[test]
+    fn normalize_scanned_pages_merges_same_logical_page() {
+        let merged = normalize_scanned_pages(vec![
+            ScannedPage {
+                page_id: String::new(),
+                title: "Home".to_string(),
+                path: "/".to_string(),
+                breadcrumb_paths: Vec::new(),
+                nav_candidates: vec![NavCandidate {
+                    label: Some("global".to_string()),
+                    targets: vec![
+                        ScannedTarget {
+                            path: "/".to_string(),
+                            title: "Home".to_string(),
+                        },
+                        ScannedTarget {
+                            path: "/pricing".to_string(),
+                            title: "Pricing".to_string(),
+                        },
+                    ],
+                }],
+                has_docs_index_candidate: false,
+                dialogs: Vec::new(),
+                opens: BTreeSet::new(),
+            },
+            ScannedPage {
+                page_id: String::new(),
+                title: "Rust Programming Language".to_string(),
+                path: "/index".to_string(),
+                breadcrumb_paths: vec!["/".to_string()],
+                nav_candidates: Vec::new(),
+                has_docs_index_candidate: false,
+                dialogs: Vec::new(),
+                opens: BTreeSet::from(["WelcomeDialog".to_string()]),
+            },
+        ]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].path, "/");
+        assert_eq!(merged[0].title, "Rust Programming Language");
+        assert_eq!(
+            merged[0].opens,
+            BTreeSet::from(["WelcomeDialog".to_string()])
+        );
+        assert_eq!(merged[0].nav_candidates.len(), 1);
     }
 
     #[test]
