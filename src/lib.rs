@@ -89,6 +89,12 @@ struct NavCluster {
     paths: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone)]
+struct LayoutGroup {
+    layout_id: String,
+    members: BTreeSet<String>,
+}
+
 pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
     let mut stack = Vec::new();
     load_document_from_path_inner(path.as_ref(), &mut stack)
@@ -258,6 +264,8 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         }
     }
 
+    let layout_groups = infer_layout_groups(&scanned_pages);
+
     let mut node = BTreeMap::new();
     let mut root_layout = NodeSpec::default();
     if !root_nav_ids.is_empty() {
@@ -266,6 +274,24 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
             .insert("nav".to_string(), AttrValue::Vector(root_nav_ids.clone()));
     }
     node.insert("RootLayout".to_string(), root_layout);
+
+    for group in &layout_groups {
+        let mut attrs = BTreeMap::new();
+        let layout_navs = nav
+            .iter()
+            .filter_map(|(nav_id, targets)| {
+                if targets.len() >= 2 && targets.is_subset(&group.members) {
+                    Some(nav_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        if !layout_navs.is_empty() {
+            attrs.insert("nav".to_string(), AttrValue::Vector(layout_navs));
+        }
+        node.insert(group.layout_id.clone(), NodeSpec { attrs });
+    }
 
     for page in &scanned_pages {
         let mut attrs = BTreeMap::new();
@@ -285,13 +311,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     }
 
     let drill = build_drill_section(&scanned_pages);
-    let inherit = BTreeMap::from([(
-        "RootLayout".to_string(),
-        scanned_pages
-            .iter()
-            .map(|page| TreeChild::Leaf(page.page_id.clone()))
-            .collect::<Vec<_>>(),
-    )]);
+    let inherit = build_inherit_section(&scanned_pages, &layout_groups);
 
     Document {
         app: None,
@@ -675,6 +695,70 @@ fn make_identifier_for_page(input: &str, path: &str, fallback: &str) -> String {
         return from_path;
     }
     fallback.to_string()
+}
+
+fn infer_layout_groups(pages: &[ScannedPage]) -> Vec<LayoutGroup> {
+    let mut members_by_segment = BTreeMap::<String, BTreeSet<String>>::new();
+    for page in pages {
+        let segments = split_path_segments(&page.path);
+        if let Some(first) = segments.first() {
+            members_by_segment
+                .entry((*first).to_string())
+                .or_default()
+                .insert(page.page_id.clone());
+        }
+    }
+
+    members_by_segment
+        .into_iter()
+        .filter(|(_segment, members)| members.len() >= 2)
+        .map(|(segment, members)| LayoutGroup {
+            layout_id: infer_layout_id_for_segment(&segment),
+            members,
+        })
+        .collect()
+}
+
+fn infer_layout_id_for_segment(segment: &str) -> String {
+    match segment {
+        "my" => "AccountLayout".to_string(),
+        "category" => "CategoryLayout".to_string(),
+        other => {
+            let mut id = make_identifier(&infer_title_from_route(&format!("/{other}")), "Layout");
+            if id.is_empty() {
+                id = "SectionLayout".to_string();
+            }
+            if !id.ends_with("Layout") {
+                id.push_str("Layout");
+            }
+            id
+        }
+    }
+}
+
+fn build_inherit_section(pages: &[ScannedPage], layout_groups: &[LayoutGroup]) -> TreeSection {
+    let mut claimed_pages = BTreeSet::new();
+    let mut children = Vec::new();
+
+    for group in layout_groups {
+        let mut members = group.members.iter().cloned().collect::<Vec<_>>();
+        members.sort();
+        claimed_pages.extend(members.iter().cloned());
+        children.push(TreeChild::Branch(
+            group.layout_id.clone(),
+            members.into_iter().map(TreeChild::Leaf).collect(),
+        ));
+    }
+
+    let mut root_pages = pages
+        .iter()
+        .map(|page| page.page_id.clone())
+        .filter(|page_id| !claimed_pages.contains(page_id))
+        .collect::<Vec<_>>();
+    root_pages.sort();
+    children.extend(root_pages.into_iter().map(TreeChild::Leaf));
+
+    BTreeMap::from([("RootLayout".to_string(), children)])
 }
 
 fn normalize_path(path: &str) -> String {
