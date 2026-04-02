@@ -7,7 +7,7 @@ Declarative `.gui` format for modeling GUI structure with two forests:
 
 The format treats `nav` as a first-class shared component.
 
-- a `nav` holds a target page set
+- a `nav` is a named ordered target page list
 - a `page` acquires navs through `traits`
 - many apparent transitions are derived from `drill` and `nav`
 
@@ -17,11 +17,14 @@ The format treats `nav` as a first-class shared component.
 app: Demo
 
 nav:
-  - id: GlobalNav
-    targets: [Home, Products, AdminRoot]
+  GlobalNav:
+    - Home
+    - Products
+    - AdminRoot
 
-  - id: ProductTabs
-    targets: [ProductDetail, ProductReviews]
+  ProductTabs:
+    - ProductDetail
+    - ProductReviews
 
 inherit:
   RootLayout:

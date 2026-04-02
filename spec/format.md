@@ -6,7 +6,7 @@ Each GUI model is defined by four main parts:
 
 - `inherit`: a forest for visual or behavioral inheritance
 - `drill`: a forest for semantic drill-down in the information space
-- `nav`: shared navigation components with target page sets
+- `nav`: named ordered target page lists
 - `pages`: page objects that acquire navs and other shared components through `traits`
 
 The model intentionally does not require a top-level `transitions` section.
@@ -21,8 +21,8 @@ Many practical transitions are derived from:
 app: Example
 
 nav:
-  - id: GlobalNav
-    targets: [Home]
+  GlobalNav:
+    - Home
 
 inherit:
   RootLayout:
@@ -42,7 +42,7 @@ pages:
 - `page.id` must be unique within a file.
 - a page may appear in at most one place in the `inherit` forest.
 - a page may appear in at most one place in the `drill` forest.
-- `nav.targets` is a page id set.
+- each `nav` entry is an ordered page id list.
 - `traits` is a set of shared component ids, including nav ids.
 - `groups` is optional and may overlap.
 

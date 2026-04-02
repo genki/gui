@@ -1,13 +1,15 @@
 app: Demo
 
 nav:
-  - id: GlobalNav
-    title: Global Navigation
-    targets: [Home, Products, AdminRoot]
+  GlobalNav:
+    - Home
+    - Products
+    - AdminRoot
 
-  - id: ProductTabs
-    title: Product Tabs
-    targets: [ProductDetail, ProductReviews, ProductRelated]
+  ProductTabs:
+    - ProductDetail
+    - ProductReviews
+    - ProductRelated
 
 inherit:
   RootLayout:
