@@ -36,19 +36,19 @@ app: Demo
 
 drill:
   Home:
-    - Products:
-        - ProductDetail:
-            - ProductReviews
-    - AdminRoot:
-        - AdminUsers
+    Products:
+      ProductDetail:
+        ProductReviews:
+    AdminRoot:
+      AdminUsers:
 
 inherit:
   RootLayout:
-    - Home
-    - Products
-    - AdminShell:
-        - AdminRoot
-        - AdminUsers
+    Home:
+    Products:
+    AdminShell:
+      AdminRoot:
+      AdminUsers:
 
 nav:
   GlobalNav:
@@ -81,6 +81,10 @@ node:
 foo:
   - bar
 ```
+
+`drill` と `inherit` は sequence ではなく tree mapping として書くのが基本です。
+leaf は `Page:` のように null child で表現でき、loader/preparser は bare leaf 行
+`Page` も `Page:` と同義に扱います。
 
 ## Repository layout
 

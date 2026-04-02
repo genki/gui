@@ -60,7 +60,8 @@ pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, Valid
 }
 
 pub fn parse_document(input: &str) -> Result<Document, ValidationError> {
-    let root: Value = serde_yaml::from_str(input)
+    let normalized = normalize_tree_shorthand(input);
+    let root: Value = serde_yaml::from_str(&normalized)
         .map_err(|err| ValidationError::new(format!("YAML parse error: {err}")))?;
     let root_map = root
         .as_mapping()
@@ -233,7 +234,39 @@ fn preprocess_source(input: &str) -> Result<(Vec<String>, String), ValidationErr
         body.push_str(line);
         body.push('\n');
     }
-    Ok((imports, body))
+    Ok((imports, normalize_tree_shorthand(&body)))
+}
+
+fn normalize_tree_shorthand(input: &str) -> String {
+    let mut out = String::new();
+    let mut in_tree_section = false;
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+
+        if indent == 0 {
+            in_tree_section = matches!(trimmed, "drill:" | "inherit:");
+        }
+
+        if in_tree_section && should_promote_tree_leaf(line) {
+            out.push_str(line);
+            out.push(':');
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn should_promote_tree_leaf(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && !trimmed.starts_with('-')
+        && !trimmed.contains(':')
+        && !trimmed.starts_with('#')
 }
 
 fn parse_import_target(rest: &str) -> Option<String> {
@@ -326,11 +359,37 @@ fn parse_tree_section(root: &Mapping, key: &str) -> Result<TreeSection, Validati
 }
 
 fn parse_tree_children(value: &Value, section: &str) -> Result<Vec<TreeChild>, ValidationError> {
-    let seq = value.as_sequence().ok_or_else(|| {
-        ValidationError::new(format!(
-            "entries in `{section}` must contain a sequence of children"
-        ))
-    })?;
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Mapping(map) => parse_tree_mapping_children(map, section),
+        Value::Sequence(seq) => parse_tree_sequence_children(seq, section),
+        _ => Err(ValidationError::new(format!(
+            "entries in `{section}` must contain a child mapping"
+        ))),
+    }
+}
+
+fn parse_tree_mapping_children(
+    map: &Mapping,
+    section: &str,
+) -> Result<Vec<TreeChild>, ValidationError> {
+    let mut children = Vec::new();
+    for (child_key, child_value) in map {
+        let child_id = expect_string(child_key, section)?;
+        let nested = parse_tree_children(child_value, section)?;
+        if nested.is_empty() {
+            children.push(TreeChild::Leaf(child_id));
+        } else {
+            children.push(TreeChild::Branch(child_id, nested));
+        }
+    }
+    Ok(children)
+}
+
+fn parse_tree_sequence_children(
+    seq: &[Value],
+    section: &str,
+) -> Result<Vec<TreeChild>, ValidationError> {
     let mut children = Vec::new();
     for item in seq {
         match item {
@@ -344,7 +403,11 @@ fn parse_tree_children(value: &Value, section: &str) -> Result<Vec<TreeChild>, V
                 let (branch_key, branch_value) = map.iter().next().expect("single entry");
                 let branch_id = expect_string(branch_key, section)?;
                 let branch_children = parse_tree_children(branch_value, section)?;
-                children.push(TreeChild::Branch(branch_id, branch_children));
+                if branch_children.is_empty() {
+                    children.push(TreeChild::Leaf(branch_id));
+                } else {
+                    children.push(TreeChild::Branch(branch_id, branch_children));
+                }
             }
             _ => {
                 return Err(ValidationError::new(format!(
@@ -633,5 +696,29 @@ node:
         validate_document(&doc).expect("validate");
         assert!(doc.nav.contains_key("GlobalNav"));
         assert!(doc.node.contains_key("RootLayout"));
+    }
+
+    #[test]
+    fn parses_mapping_tree_with_leaf_shorthand() {
+        let src = r#"
+app: Demo
+drill:
+  Home:
+    Products:
+      ProductDetail:
+        ProductReviews
+inherit:
+  RootLayout:
+    Home
+    Products
+    ProductDetail
+    ProductReviews
+node:
+  Home:
+    path: /
+"#;
+
+        let doc = parse_document(src).expect("parse");
+        validate_document(&doc).expect("validate");
     }
 }

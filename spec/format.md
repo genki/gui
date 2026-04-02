@@ -45,11 +45,11 @@ Many practical transitions are derived from:
 app: Example
 
 drill:
-  Home: []
+  Home:
 
 inherit:
   RootLayout:
-    - Home
+    Home:
 
 nav:
   GlobalNav:
@@ -66,6 +66,8 @@ node:
 ## Rules
 
 - `node` is a map keyed by unique node id.
+- `drill` and `inherit` are tree mappings, not ordered sequences.
+- leaf nodes in `drill` / `inherit` may be written as `Leaf:` or as a bare line `Leaf`.
 - `#import "..."` is resolved relative to the importing file.
 - import cycles are invalid.
 - every `inherit` leaf is a page.

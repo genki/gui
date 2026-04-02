@@ -2,23 +2,23 @@ app: Demo
 
 drill:
   Home:
-    - Products:
-        - ProductDetail:
-            - ProductReviews
-            - ProductRelated
-    - AdminRoot:
-        - AdminUsers
+    Products:
+      ProductDetail:
+        ProductReviews:
+        ProductRelated:
+    AdminRoot:
+      AdminUsers:
 
 inherit:
   RootLayout:
-    - Home
-    - Products
-    - ProductDetail
-    - ProductReviews
-    - ProductRelated
-    - AdminShell:
-        - AdminRoot:
-            - AdminUsers
+    Home:
+    Products:
+    ProductDetail:
+    ProductReviews:
+    ProductRelated:
+    AdminShell:
+      AdminRoot:
+        AdminUsers:
 
 nav:
   GlobalNav:
