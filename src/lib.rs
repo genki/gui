@@ -267,7 +267,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         }
     }
 
-    let layout_groups = infer_layout_groups(&scanned_pages);
+    let layout_groups = infer_layout_groups(&scanned_pages, &nav, &root_nav_ids);
     let drill = build_drill_section(&scanned_pages);
     let section_page_ids = collect_section_page_ids(&drill);
 
@@ -794,9 +794,30 @@ fn make_identifier_for_page(input: &str, path: &str, fallback: &str) -> String {
     fallback.to_string()
 }
 
-fn infer_layout_groups(pages: &[ScannedPage]) -> Vec<LayoutGroup> {
+fn infer_layout_groups(
+    pages: &[ScannedPage],
+    nav: &BTreeMap<String, BTreeSet<String>>,
+    root_nav_ids: &BTreeSet<String>,
+) -> Vec<LayoutGroup> {
+    let mut groups = Vec::new();
+    let mut claimed_pages = BTreeSet::new();
+
+    for (nav_id, targets) in nav {
+        if root_nav_ids.contains(nav_id) || targets.len() < 2 {
+            continue;
+        }
+        claimed_pages.extend(targets.iter().cloned());
+        groups.push(LayoutGroup {
+            layout_id: infer_layout_id_for_nav(nav_id),
+            members: targets.clone(),
+        });
+    }
+
     let mut members_by_segment = BTreeMap::<String, BTreeSet<String>>::new();
     for page in pages {
+        if claimed_pages.contains(&page.page_id) {
+            continue;
+        }
         let segments = split_path_segments(&page.path);
         if let Some(first) = segments.first() {
             members_by_segment
@@ -806,14 +827,25 @@ fn infer_layout_groups(pages: &[ScannedPage]) -> Vec<LayoutGroup> {
         }
     }
 
-    members_by_segment
-        .into_iter()
-        .filter(|(_segment, members)| members.len() >= 2)
-        .map(|(segment, members)| LayoutGroup {
-            layout_id: infer_layout_id_for_segment(&segment),
-            members,
-        })
-        .collect()
+    groups.extend(
+        members_by_segment
+            .into_iter()
+            .filter(|(_segment, members)| members.len() >= 2)
+            .map(|(segment, members)| LayoutGroup {
+                layout_id: infer_layout_id_for_segment(&segment),
+                members,
+            }),
+    );
+
+    groups
+}
+
+fn infer_layout_id_for_nav(nav_id: &str) -> String {
+    if let Some(base) = nav_id.strip_suffix("Nav") {
+        format!("{base}Layout")
+    } else {
+        format!("{nav_id}Layout")
+    }
 }
 
 fn infer_layout_id_for_segment(segment: &str) -> String {
@@ -1693,13 +1725,15 @@ fn collect_nodes_children(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::{BTreeMap, BTreeSet},
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        build_drill_section, load_document_from_path, load_documents_from_paths, parse_document,
-        render_document, scan_html_paths, validate_document, AttrValue, ScannedPage, TreeChild,
+        build_drill_section, infer_layout_groups, load_document_from_path,
+        load_documents_from_paths, parse_document, render_document, scan_html_paths,
+        validate_document, AttrValue, ScannedPage, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -2083,5 +2117,49 @@ node:
             "Guide".to_string(),
             vec![TreeChild::Leaf("Faq".to_string())],
         )));
+    }
+
+    #[test]
+    fn infer_layout_groups_prefers_non_root_nav_targets() {
+        let pages = vec![
+            ScannedPage {
+                page_id: "Home".to_string(),
+                title: "Home".to_string(),
+                path: "/".to_string(),
+                breadcrumb_paths: Vec::new(),
+                nav_candidates: Vec::new(),
+            },
+            ScannedPage {
+                page_id: "My".to_string(),
+                title: "My".to_string(),
+                path: "/my".to_string(),
+                breadcrumb_paths: Vec::new(),
+                nav_candidates: Vec::new(),
+            },
+            ScannedPage {
+                page_id: "MyOrders".to_string(),
+                title: "My Orders".to_string(),
+                path: "/my/orders".to_string(),
+                breadcrumb_paths: Vec::new(),
+                nav_candidates: Vec::new(),
+            },
+        ];
+        let nav = BTreeMap::from([
+            (
+                "GlobalNav".to_string(),
+                BTreeSet::from(["Home".to_string(), "My".to_string()]),
+            ),
+            (
+                "AccountNav".to_string(),
+                BTreeSet::from(["My".to_string(), "MyOrders".to_string()]),
+            ),
+        ]);
+        let root_nav_ids = BTreeSet::from(["GlobalNav".to_string()]);
+
+        let groups = infer_layout_groups(&pages, &nav, &root_nav_ids);
+        assert!(groups.iter().any(|group| {
+            group.layout_id == "AccountLayout"
+                && group.members == BTreeSet::from(["My".to_string(), "MyOrders".to_string()])
+        }));
     }
 }

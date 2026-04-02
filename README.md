@@ -126,6 +126,7 @@ gui scan page1.html page2.html
   - link cluster の path 傾向から `CategoryNav` / `AccountNav` / `FooterNav` を推定する
   - 出力 `node` には `kind: page|section|layout` を付け、抽象化後の役割を明示する
   - breadcrumb がある場合は `drill` の親推定で path prefix より優先して使う
+  - 複数ページで共有される non-root nav target 群は `AccountLayout` などの部分 layout 推定に使う
 
 `scan` は HTML の取得や JavaScript 実行を行いません。入力は別ツールで保存した
 rendered HTML を想定します。設計メモは `spec/scan.md` にあります。
