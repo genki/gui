@@ -5,8 +5,8 @@ use std::{
 };
 
 use abstract_gui::{
-    load_documents_from_paths, page_nodes, render_document, scan_html_paths, validate_document,
-    Document, TreeChild, TreeSection,
+    load_documents_from_paths, page_nodes, render_document, render_scan_summary,
+    scan_html_paths_with_stage, validate_document, Document, ScanStage, TreeChild, TreeSection,
 };
 
 fn main() {
@@ -24,7 +24,18 @@ fn main() {
         print_usage(&program);
         process::exit(2);
     }
-    let raw_paths = args.collect::<Vec<_>>();
+    let raw_args = args.collect::<Vec<_>>();
+    let (scan_stage, raw_paths) = if command == "scan" {
+        match parse_scan_args(raw_args) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                eprintln!("{message}");
+                process::exit(2);
+            }
+        }
+    } else {
+        (ScanStage::Abstract, raw_args)
+    };
     let paths = match if command == "scan" {
         resolve_scan_input_paths(raw_paths)
     } else {
@@ -79,20 +90,24 @@ fn main() {
             }
         }
         "scan" => {
-            let doc = match scan_html_paths(paths.iter()) {
-                Ok(doc) => doc,
+            let result = match scan_html_paths_with_stage(paths.iter(), scan_stage) {
+                Ok(result) => result,
                 Err(err) => {
                     eprintln!("scan error: {}", err.message);
                     process::exit(1);
                 }
             };
+            let doc = result.document;
             if let Err(errors) = validate_document(&doc) {
                 for err in errors {
                     eprintln!("validation error: {}", err.message);
                 }
                 process::exit(1);
             }
-            print!("{}", render_document(&doc));
+            match scan_stage {
+                ScanStage::Abstract => print!("{}", render_document(&doc)),
+                ScanStage::Summary => print!("{}", render_scan_summary(&result.summary)),
+            }
         }
         _ => unreachable!(),
     }
@@ -106,6 +121,7 @@ fn print_usage(program: &str) {
     eprintln!("       {program} node [file.gui ...]");
     eprintln!("       {program} nav [file.gui ...]");
     eprintln!("       {program} scan <file.html> [more.html ...]");
+    eprintln!("       {program} scan --stage summary <file.html|snapshot.yaml> [...]");
 }
 
 fn load_and_validate(paths: &[PathBuf]) -> Document {
@@ -185,9 +201,34 @@ fn collect_files_with_extensions(
 fn resolve_scan_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
     resolve_paths_by_extension(
         paths,
-        &["html", "htm"],
-        "scan requires at least one html file",
+        &["html", "htm", "yaml", "yml"],
+        "scan requires at least one html or yaml file",
     )
+}
+
+fn parse_scan_args(args: Vec<String>) -> Result<(ScanStage, Vec<String>), String> {
+    let mut stage = ScanStage::Abstract;
+    let mut paths = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--stage" {
+            let Some(value) = iter.next() else {
+                return Err("--stage requires a value".to_string());
+            };
+            stage = match value.as_str() {
+                "abstract" => ScanStage::Abstract,
+                "summary" => ScanStage::Summary,
+                other => {
+                    return Err(format!(
+                        "unknown scan stage: {other} (expected: abstract, summary)"
+                    ))
+                }
+            };
+            continue;
+        }
+        paths.push(arg);
+    }
+    Ok((stage, paths))
 }
 
 fn resolve_paths_by_extension(
@@ -226,7 +267,8 @@ fn resolve_paths_by_extension(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_input_paths, resolve_scan_input_paths};
+    use super::{parse_scan_args, resolve_input_paths, resolve_scan_input_paths};
+    use abstract_gui::ScanStage;
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -259,6 +301,18 @@ mod tests {
         assert!(resolved.iter().any(|path| path.ends_with("b.gui")));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_scan_args_supports_stage_flag() {
+        let (stage, paths) = parse_scan_args(vec![
+            "--stage".to_string(),
+            "summary".to_string(),
+            "sample.yaml".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(stage, ScanStage::Summary);
+        assert_eq!(paths, vec!["sample.yaml".to_string()]);
     }
 
     #[test]
