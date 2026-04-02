@@ -735,6 +735,14 @@ fn compare_page_controls(
             });
         }
     }
+    for control_key_name in right_controls.keys() {
+        if !left_controls.contains_key(control_key_name) {
+            findings.push(CompareFinding {
+                kind: "unexpected-control".to_string(),
+                message: format!("state `{key}` で right にのみ control `{control_key_name}` がある"),
+            });
+        }
+    }
     for (control_key_name, left_control) in &left_controls {
         let Some(right_control) = right_controls.get(control_key_name) else {
             continue;
@@ -806,6 +814,12 @@ fn compare_page_nav(
         findings.push(CompareFinding {
             kind: "nav-mismatch".to_string(),
             message: format!("state `{key}` で right に nav target set {:?} が無い", targets),
+        });
+    }
+    for targets in right_nav.difference(&left_nav) {
+        findings.push(CompareFinding {
+            kind: "unexpected-nav".to_string(),
+            message: format!("state `{key}` で right にのみ nav target set {:?} がある", targets),
         });
     }
 }
@@ -3509,7 +3523,7 @@ mod tests {
     use super::{
         build_drill_section, infer_layout_groups, infer_page_path, load_document_from_path,
         load_documents_from_paths, normalize_logical_page_path, normalize_scanned_pages,
-        compare_scan_inputs_with_config, parse_document, prune_redundant_nav_clusters, render_compare_report,
+        compare_scan_inputs, compare_scan_inputs_with_config, parse_document, prune_redundant_nav_clusters, render_compare_report,
         render_document, render_scan_summary, scan_html_paths, scan_html_paths_with_stage,
         validate_document, AttrValue, NavCandidate, NavCluster, ScanConfig, ScanStage, ScannedPage,
         ScannedTarget, TreeChild,
@@ -4450,6 +4464,59 @@ node:
         assert!(rendered.contains("[missing-control]"));
         assert!(rendered.contains("[state-hint-mismatch]"));
         assert!(rendered.contains("[stepper-mismatch]"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compare_scan_inputs_preserves_left_right_direction_for_controls() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-compare-direction-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left_html = dir.join("left.html");
+        let right_html = dir.join("right.html");
+        let left_manifest = dir.join("left.snapshot.yaml");
+        let right_manifest = dir.join("right.snapshot.yaml");
+        fs::write(
+            &left_html,
+            r#"<!doctype html><html><head><title>PIR</title></head><body><button>左だけ</button></body></html>"#,
+        )
+        .expect("write left html");
+        fs::write(
+            &right_html,
+            r#"<!doctype html><html><head><title>PIR</title></head><body><button>右だけ</button></body></html>"#,
+        )
+        .expect("write right html");
+        fs::write(
+            &left_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: left.html
+"#,
+        )
+        .expect("write left manifest");
+        fs::write(
+            &right_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: right.html
+"#,
+        )
+        .expect("write right manifest");
+
+        let rendered = render_compare_report(
+            &compare_scan_inputs(&left_manifest, &right_manifest).expect("compare"),
+        );
+        assert!(rendered.contains("[missing-control]"));
+        assert!(rendered.contains("right に control `button:左だけ` が無い"));
+        assert!(!rendered.contains("right に control `button:右だけ` が無い"));
+        assert!(rendered.contains("[unexpected-control]"));
+        assert!(rendered.contains("right にのみ control `button:右だけ` がある"));
 
         fs::remove_dir_all(&dir).ok();
     }

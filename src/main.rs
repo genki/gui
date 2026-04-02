@@ -243,11 +243,23 @@ fn resolve_scan_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> 
 }
 
 fn resolve_compare_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
-    let resolved = resolve_paths_by_extension(
-        paths,
-        &["html", "htm", "yaml", "yml"],
-        "compare requires exactly two html or yaml files",
-    )?;
+    let mut resolved = Vec::new();
+    for raw_path in paths {
+        let path = PathBuf::from(raw_path);
+        if path.is_dir() {
+            let mut discovered = Vec::new();
+            collect_files_with_extensions(&path, &["html", "htm", "yaml", "yml"], &mut discovered)
+                .map_err(|err| err.to_string())?;
+            discovered.sort();
+            resolved.extend(discovered);
+        } else {
+            resolved.push(path);
+        }
+    }
+    resolved.dedup();
+    if resolved.is_empty() {
+        return Err("compare requires exactly two html or yaml files".to_string());
+    }
     if resolved.len() != 2 {
         return Err("compare requires exactly two html or yaml files".to_string());
     }
@@ -409,6 +421,19 @@ mod tests {
     fn resolve_compare_input_paths_requires_two_inputs() {
         let err = resolve_compare_input_paths(vec!["one.html".to_string()]).expect_err("should fail");
         assert!(err.contains("exactly two"));
+    }
+
+    #[test]
+    fn resolve_compare_input_paths_preserves_explicit_argument_order() {
+        let resolved = resolve_compare_input_paths(vec![
+            "right.html".to_string(),
+            "left.html".to_string(),
+        ])
+        .expect("resolve");
+        assert_eq!(
+            resolved,
+            vec![PathBuf::from("right.html"), PathBuf::from("left.html")]
+        );
     }
 
     #[test]
