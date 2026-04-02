@@ -250,6 +250,8 @@ pub struct StepperScanConfig {
     pub max_label_len: usize,
     #[serde(default = "default_stepper_max_word_count")]
     pub max_word_count: usize,
+    #[serde(default = "default_stepper_semantic_hint_tokens")]
+    pub semantic_hint_tokens: Vec<String>,
 }
 
 impl Default for StepperScanConfig {
@@ -261,6 +263,7 @@ impl Default for StepperScanConfig {
             active_class_contains: Vec::new(),
             max_label_len: default_stepper_max_label_len(),
             max_word_count: default_stepper_max_word_count(),
+            semantic_hint_tokens: default_stepper_semantic_hint_tokens(),
         }
     }
 }
@@ -301,6 +304,15 @@ fn default_stepper_max_label_len() -> usize {
 
 fn default_stepper_max_word_count() -> usize {
     6
+}
+
+fn default_stepper_semantic_hint_tokens() -> Vec<String> {
+    vec![
+        "step".to_string(),
+        "wizard".to_string(),
+        "progress".to_string(),
+        "flow".to_string(),
+    ]
 }
 
 pub fn load_scan_config_from_path(path: &Path) -> Result<ScanConfig, ValidationError> {
@@ -1393,6 +1405,12 @@ fn extract_steppers(html: &Html, config: &ScanConfig) -> Vec<ScannedStepper> {
         .iter()
         .filter_map(|selector_text| Selector::parse(selector_text).ok())
         .collect::<Vec<_>>();
+    let indicator_selectors = config
+        .stepper
+        .indicator_selectors
+        .iter()
+        .filter_map(|selector_text| Selector::parse(selector_text).ok())
+        .collect::<Vec<_>>();
 
     for selector_text in &config.stepper.indicator_selectors {
         let Ok(indicator_selector) = Selector::parse(selector_text) else {
@@ -1429,6 +1447,9 @@ fn extract_steppers(html: &Html, config: &ScanConfig) -> Vec<ScannedStepper> {
         for container in html.select(&selector) {
             let mut labels = Vec::new();
             let mut active_label = None;
+            let has_indicator_descendant = indicator_selectors
+                .iter()
+                .any(|indicator_selector| container.select(indicator_selector).next().is_some());
 
             for child in direct_element_children(&container) {
                 let label = collapse_text(child.text().collect::<String>());
@@ -1462,10 +1483,61 @@ fn extract_steppers(html: &Html, config: &ScanConfig) -> Vec<ScannedStepper> {
                 }
             }
 
+            if !should_keep_container_stepper_candidate(
+                &container,
+                &labels,
+                has_indicator_descendant,
+                config,
+            ) {
+                continue;
+            }
+
             push_stepper_candidate(&mut steppers, &mut seen, labels, active_label);
         }
     }
     normalize_steppers(steppers)
+}
+
+fn should_keep_container_stepper_candidate(
+    container: &scraper::ElementRef<'_>,
+    labels: &[String],
+    has_indicator_descendant: bool,
+    config: &ScanConfig,
+) -> bool {
+    if labels.len() < 2 {
+        return false;
+    }
+
+    has_indicator_descendant
+        || has_stepper_semantic_hint(container, config)
+        || labels_have_numeric_step_sequence(labels)
+}
+
+fn has_stepper_semantic_hint(container: &scraper::ElementRef<'_>, config: &ScanConfig) -> bool {
+    let attrs = [
+        container.value().name(),
+        container.value().attr("class").unwrap_or_default(),
+        container.value().attr("id").unwrap_or_default(),
+        container.value().attr("role").unwrap_or_default(),
+        container.value().attr("aria-label").unwrap_or_default(),
+        container.value().attr("data-testid").unwrap_or_default(),
+        container.value().attr("title").unwrap_or_default(),
+    ]
+    .join(" ")
+    .to_ascii_lowercase();
+
+    config
+        .stepper
+        .semantic_hint_tokens
+        .iter()
+        .map(|token| token.to_ascii_lowercase())
+        .any(|token| attrs.contains(&token))
+}
+
+fn labels_have_numeric_step_sequence(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| label.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
 }
 
 fn direct_element_children<'a>(
@@ -4683,6 +4755,21 @@ node:
         let dialogs = super::extract_dialogs(&html, "PIR");
         assert_eq!(dialogs.len(), 1);
         assert_eq!(dialogs[0].title, "PIR設定ウィザード");
+    }
+
+    #[test]
+    fn extract_steppers_ignores_plain_toggle_groups() {
+        let html = scraper::Html::parse_document(
+            r#"<!doctype html><html><body>
+            <div role='tablist' class='view-switch'>
+              <button role='tab' aria-selected='true'>リスト表示</button>
+              <button role='tab'>マップ表示</button>
+            </div>
+            </body></html>"#,
+        );
+        let config = ScanConfig::default();
+        let steppers = super::extract_steppers(&html, &config);
+        assert!(steppers.is_empty());
     }
 
     #[test]
