@@ -8,8 +8,10 @@ Declarative `.gui` format for modeling GUI structure with two forests:
 The format treats `nav` as a first-class shared component.
 
 - a `nav` is a named ordered target page list
-- a `page` directly declares the navs it exposes
-- every page must appear exactly once as a leaf in `inherit`
+- any `node` may declare attributes such as `path` or `nav`
+- those attributes are inherited through `inherit`
+- every `inherit` leaf is a page
+- every node that appears in `drill` is a page
 - non-leaf `inherit` nodes may be layouts or shells
 - many apparent transitions are derived from `drill` and `nav`
 
@@ -44,18 +46,22 @@ nav:
     - ProductDetail
     - ProductReviews
 
-pages:
+nodes:
+  RootLayout:
+    nav: [GlobalNav]
+
+  AdminShell:
+    nav: [GlobalNav]
+
   Home:
     path: /
-    nav: [GlobalNav]
 
   Products:
     path: /products
-    nav: [GlobalNav]
 
   ProductDetail:
     path: /products/:id
-    nav: [GlobalNav, ProductTabs]
+    nav: [ProductTabs]
 ```
 
 `foo: [bar]` is shorthand for:

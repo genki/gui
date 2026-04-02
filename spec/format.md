@@ -7,11 +7,15 @@ Each GUI model is defined by four main parts:
 - `drill`: a forest for semantic drill-down in the information space
 - `inherit`: a forest for visual or behavioral inheritance
 - `nav`: named ordered target page lists
-- `pages`: page objects keyed by page id
+- `nodes`: attributed nodes keyed by node id
 
-Every page must appear exactly once as a leaf in the `inherit` forest.
+Every `inherit` leaf is a page.
+Every node that appears in the `drill` forest is a page.
 Non-leaf nodes in the `inherit` forest may instead represent layouts, shells,
 or templates.
+
+Any node may declare attributes such as `path`, `nav`, `title`, or future
+capabilities. Those attributes are inherited through the `inherit` forest.
 
 The model intentionally does not require a top-level `transitions` section.
 Many practical transitions are derived from:
@@ -35,21 +39,26 @@ nav:
   GlobalNav:
     - Home
 
-pages:
+nodes:
+  RootLayout:
+    nav: [GlobalNav]
+
   Home:
     path: /
-    nav: [GlobalNav]
 ```
 
 ## Rules
 
-- `pages` is a map keyed by unique page id.
-- every page must appear exactly once as an `inherit` leaf.
+- `nodes` is a map keyed by unique node id.
+- every `inherit` leaf is a page.
+- every node that appears in `drill` is a page.
 - a non-leaf `inherit` node is not necessarily a page.
 - a non-leaf `inherit` node may represent a layout, shell, or template.
 - a page may appear in at most one place in the `drill` forest.
 - each `nav` entry is an ordered page id list.
-- `page.nav` is a set or ordered list of nav ids.
+- any node may define attributes.
+- `node.nav` is a set or ordered list of nav ids.
+- inherited attributes merge downward unless overridden by a child node.
 - `groups` is optional and may overlap.
 
 ## Shorthand
