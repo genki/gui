@@ -72,6 +72,11 @@ struct NavCandidate {
 }
 
 #[derive(Debug, Clone)]
+struct NavCandidateMeta {
+    selector: String,
+}
+
+#[derive(Debug, Clone)]
 struct ScannedTarget {
     path: String,
     title: String,
@@ -157,7 +162,7 @@ where
         .into_iter()
         .map(|(page_id, title, location, html)| ScannedPage {
             breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
-            nav_candidates: extract_nav_candidates(&html, location.host.as_deref()),
+            nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path),
             page_id,
             title,
             path: location.path,
@@ -255,7 +260,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     let mut nav_usage = BTreeMap::<String, BTreeSet<String>>::new();
     let mut root_nav_ids = BTreeSet::new();
     let mut next_nav_idx = 1;
-    for (targets, cluster) in nav_clusters {
+    for (targets, cluster) in prune_redundant_nav_clusters(nav_clusters) {
         let preferred_nav_id = classify_nav_cluster(&cluster, input_page_count, targets.len());
         let nav_id = allocate_nav_id(preferred_nav_id, &nav, &mut next_nav_idx);
         if should_attach_nav_to_root_layout(&nav_id, &cluster, input_page_count, targets.len()) {
@@ -402,7 +407,11 @@ fn infer_page_path(path: &Path) -> String {
     }
 }
 
-fn extract_nav_candidates(html: &Html, page_host: Option<&str>) -> Vec<NavCandidate> {
+fn extract_nav_candidates(
+    html: &Html,
+    page_host: Option<&str>,
+    page_path: &str,
+) -> Vec<NavCandidate> {
     let selectors = [
         "nav",
         "[role='navigation']",
@@ -441,11 +450,16 @@ fn extract_nav_candidates(html: &Html, page_host: Option<&str>) -> Vec<NavCandid
             if targets.len() < 2 {
                 continue;
             }
+            let meta = NavCandidateMeta {
+                selector: selector_text.to_string(),
+            };
             let candidate = NavCandidate {
                 label: extract_container_label(&container),
                 targets: targets.into_values().collect(),
             };
-            if !candidate.targets.is_empty() {
+            if !candidate.targets.is_empty()
+                && !should_skip_nav_candidate(&candidate, &meta, page_path)
+            {
                 candidates.push(candidate);
             }
         }
@@ -513,10 +527,11 @@ fn normalize_internal_href_to_path(href: &str, page_host: Option<&str>) -> Optio
     }
 
     if let Ok(url) = Url::parse(trimmed) {
-        if let Some(page_host) = page_host {
-            if url.host_str() != Some(page_host) {
-                return None;
-            }
+        let Some(page_host) = page_host else {
+            return None;
+        };
+        if url.host_str() != Some(page_host) {
+            return None;
         }
         return Some(normalize_path(url.path()));
     }
@@ -669,6 +684,9 @@ fn is_probably_page_path(path: &str) -> bool {
         "/purchase",
         "/order/",
         "/basket",
+        "/issues/new/choose",
+        "/profile/",
+        "/channel/",
     ];
     if blocked_fragments
         .iter()
@@ -677,6 +695,91 @@ fn is_probably_page_path(path: &str) -> bool {
         return false;
     }
     true
+}
+
+fn should_skip_nav_candidate(
+    candidate: &NavCandidate,
+    meta: &NavCandidateMeta,
+    page_path: &str,
+) -> bool {
+    if candidate.targets.len() < 2 {
+        return true;
+    }
+    if is_locale_switcher_candidate(candidate, meta) {
+        return true;
+    }
+    if is_footer_directory_candidate(candidate, meta) {
+        return true;
+    }
+    if is_docs_index_candidate(candidate, page_path) {
+        return true;
+    }
+    false
+}
+
+fn is_locale_switcher_candidate(candidate: &NavCandidate, meta: &NavCandidateMeta) -> bool {
+    let label = candidate
+        .label
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if label.contains("locale") || label.contains("language") || label.contains("lang") {
+        return true;
+    }
+    let locale_titles = candidate
+        .targets
+        .iter()
+        .filter(|target| is_locale_like_title(&target.title))
+        .count();
+    locale_titles >= 3 && locale_titles * 2 >= candidate.targets.len()
+        || meta.selector == "footer" && locale_titles >= 2 && candidate.targets.len() >= 4
+}
+
+fn is_locale_like_title(title: &str) -> bool {
+    let lowered = title.trim().to_ascii_lowercase();
+    matches!(
+        lowered.as_str(),
+        "english"
+            | "deutsch"
+            | "français"
+            | "francais"
+            | "español"
+            | "espanol"
+            | "italiano"
+            | "nederlands"
+            | "português"
+            | "portugues"
+            | "svenska"
+            | "日本"
+            | "日本語"
+            | "thai"
+            | "ไทย"
+    )
+}
+
+fn is_footer_directory_candidate(candidate: &NavCandidate, meta: &NavCandidateMeta) -> bool {
+    meta.selector == "footer" && candidate.targets.len() >= 16
+}
+
+fn is_docs_index_candidate(candidate: &NavCandidate, page_path: &str) -> bool {
+    if candidate.targets.len() < 30 {
+        return false;
+    }
+    let segments = split_path_segments(page_path);
+    if segments.len() < 2 {
+        return false;
+    }
+    let prefixes = (2..=segments.len())
+        .map(|len| format!("/{}", segments[..len].join("/")))
+        .collect::<Vec<_>>();
+    prefixes.into_iter().any(|prefix| {
+        let matching = candidate
+            .targets
+            .iter()
+            .filter(|target| target.path.starts_with(&prefix))
+            .count();
+        matching * 4 >= candidate.targets.len() * 3
+    })
 }
 
 fn suggest_nav_id(label: &str) -> Option<String> {
@@ -766,6 +869,37 @@ fn allocate_nav_id(
             return candidate;
         }
     }
+}
+
+fn prune_redundant_nav_clusters(
+    nav_clusters: BTreeMap<BTreeSet<String>, NavCluster>,
+) -> Vec<(BTreeSet<String>, NavCluster)> {
+    let clusters = nav_clusters.into_iter().collect::<Vec<_>>();
+    let mut keep = vec![true; clusters.len()];
+    for i in 0..clusters.len() {
+        for j in 0..clusters.len() {
+            if i == j || !keep[i] {
+                continue;
+            }
+            let (targets_i, cluster_i) = &clusters[i];
+            let (targets_j, cluster_j) = &clusters[j];
+            if targets_i.len() >= targets_j.len() {
+                continue;
+            }
+            if cluster_i.owners != cluster_j.owners {
+                continue;
+            }
+            let intersection = targets_i.intersection(targets_j).count();
+            if intersection == targets_i.len() && intersection * 100 >= targets_j.len() * 75 {
+                keep[i] = false;
+            }
+        }
+    }
+    clusters
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, cluster)| keep[idx].then_some(cluster))
+        .collect()
 }
 
 fn unique_page_id(title: &str, path: &str, used_ids: &mut BTreeSet<String>) -> String {
@@ -1732,8 +1866,8 @@ mod tests {
 
     use super::{
         build_drill_section, infer_layout_groups, load_document_from_path,
-        load_documents_from_paths, parse_document, render_document, scan_html_paths,
-        validate_document, AttrValue, ScannedPage, TreeChild,
+        load_documents_from_paths, parse_document, prune_redundant_nav_clusters, render_document,
+        scan_html_paths, validate_document, AttrValue, NavCluster, ScannedPage, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -2161,5 +2295,156 @@ node:
             group.layout_id == "AccountLayout"
                 && group.members == BTreeSet::from(["My".to_string(), "MyOrders".to_string()])
         }));
+    }
+
+    #[test]
+    fn scan_ignores_locale_switcher_and_huge_footer_directory() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-locale-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("locale-home.html");
+        fs::write(
+            &home,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Stripe Like</title>
+    <link rel="canonical" href="https://example.test/" />
+  </head>
+  <body>
+    <footer>
+      <div class="footer-links">
+        <a href="https://example.test/docs">Docs</a>
+        <a href="https://example.test/pricing">Pricing</a>
+        <a href="https://example.test/about">About</a>
+        <a href="https://example.test/blog">Blog</a>
+        <a href="https://example.test/customers">Customers</a>
+        <a href="https://example.test/partners">Partners</a>
+        <a href="https://example.test/startups">Startups</a>
+        <a href="https://example.test/enterprise">Enterprise</a>
+        <a href="https://example.test/security">Security</a>
+        <a href="https://example.test/tax">Tax</a>
+        <a href="https://example.test/billing">Billing</a>
+        <a href="https://example.test/connect">Connect</a>
+        <a href="https://example.test/payments">Payments</a>
+        <a href="https://example.test/invoicing">Invoicing</a>
+        <a href="https://example.test/atlas">Atlas</a>
+        <a href="https://example.test/issuing">Issuing</a>
+      </div>
+      <div class="locale-switcher" aria-label="locale switcher">
+        <a href="https://example.test/en">English</a>
+        <a href="https://example.test/de">Deutsch</a>
+        <a href="https://example.test/fr">Français</a>
+        <a href="https://example.test/ja">日本語</a>
+      </div>
+    </footer>
+  </body>
+</html>"#,
+        )
+        .expect("write home");
+
+        let doc = scan_html_paths([&home]).expect("scan");
+        assert!(doc.nav.is_empty());
+        assert_eq!(doc.node.len(), 2);
+        assert!(doc.node.contains_key("RootLayout"));
+        assert!(doc.node.contains_key("StripeLike"));
+    }
+
+    #[test]
+    fn scan_rejects_absolute_external_links_when_page_host_unknown() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-external-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("rust-like.html");
+        fs::write(
+            &home,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Rust Like</title>
+  </head>
+  <body>
+    <header>
+      <nav>
+        <a href="/learn">Learn</a>
+        <a href="/community">Community</a>
+        <a href="https://github.com/example/site/issues/new/choose">File an issue!</a>
+        <a href="https://www.youtube.com/channel/UC123">Watch videos</a>
+      </nav>
+    </header>
+  </body>
+</html>"#,
+        )
+        .expect("write home");
+
+        let doc = scan_html_paths([&home]).expect("scan");
+        assert!(doc.node.contains_key("Learn"));
+        assert!(doc.node.contains_key("Community"));
+        assert!(!doc.node.contains_key("FileAnIssue"));
+        assert!(!doc.node.contains_key("WatchVideos"));
+    }
+
+    #[test]
+    fn scan_skips_huge_docs_index_candidate() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-docs-index-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let home = dir.join("docs.html");
+        let links = (0..32)
+            .map(|idx| format!("<a href=\"https://example.test/en-US/docs/Web/JavaScript/Ref{idx}\">Ref {idx}</a>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(
+            &home,
+            format!(
+                "<!doctype html><html><head><title>JS</title><link rel=\"canonical\" href=\"https://example.test/en-US/docs/Web/JavaScript\" /></head><body><nav>{links}</nav></body></html>"
+            ),
+        )
+        .expect("write home");
+
+        let doc = scan_html_paths([&home]).expect("scan");
+        assert!(doc.nav.is_empty());
+        assert_eq!(doc.node.len(), 2);
+        assert!(doc.node.contains_key("RootLayout"));
+        assert!(doc.node.contains_key("Js"));
+    }
+
+    #[test]
+    fn prune_redundant_nav_clusters_drops_near_subset_duplicate() {
+        let mut input = BTreeMap::new();
+        input.insert(
+            BTreeSet::from([
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string(),
+            ]),
+            NavCluster {
+                owners: BTreeSet::from(["Home".to_string()]),
+                label: Some("global".to_string()),
+                paths: BTreeSet::new(),
+            },
+        );
+        input.insert(
+            BTreeSet::from(["A".to_string(), "B".to_string(), "C".to_string()]),
+            NavCluster {
+                owners: BTreeSet::from(["Home".to_string()]),
+                label: Some("global duplicate".to_string()),
+                paths: BTreeSet::new(),
+            },
+        );
+
+        let pruned = prune_redundant_nav_clusters(input);
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].0.len(), 4);
     }
 }
