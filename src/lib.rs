@@ -86,6 +86,7 @@ struct PageLocation {
 struct NavCluster {
     owners: BTreeSet<String>,
     label: Option<String>,
+    paths: BTreeSet<String>,
 }
 
 pub fn load_document_from_path(path: impl AsRef<Path>) -> Result<Document, ValidationError> {
@@ -232,6 +233,9 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
             }
             let cluster = nav_clusters.entry(targets).or_default();
             cluster.owners.insert(page.page_id.clone());
+            cluster
+                .paths
+                .extend(candidate.targets.iter().map(|target| target.path.clone()));
             if cluster.label.is_none() {
                 cluster.label = candidate.label.clone();
             }
@@ -240,22 +244,14 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
 
     let mut nav = BTreeMap::new();
     let mut nav_usage = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut root_nav_ids = BTreeSet::new();
     let mut next_nav_idx = 1;
     for (targets, cluster) in nav_clusters {
-        let preferred_nav_id = if cluster.owners.len() == input_page_count && input_page_count > 1 {
-            Some("GlobalNav".to_string())
-        } else if input_page_count == 1 && targets.len() >= 3 {
-            Some(
-                cluster
-                    .label
-                    .as_deref()
-                    .and_then(suggest_nav_id)
-                    .unwrap_or_else(|| "GlobalNav".to_string()),
-            )
-        } else {
-            cluster.label.as_deref().and_then(suggest_nav_id)
-        };
+        let preferred_nav_id = classify_nav_cluster(&cluster, input_page_count, targets.len());
         let nav_id = allocate_nav_id(preferred_nav_id, &nav, &mut next_nav_idx);
+        if should_attach_nav_to_root_layout(&nav_id, &cluster, input_page_count, targets.len()) {
+            root_nav_ids.insert(nav_id.clone());
+        }
         nav.insert(nav_id.clone(), targets);
         for owner in cluster.owners {
             nav_usage.entry(owner).or_default().insert(nav_id.clone());
@@ -264,13 +260,10 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
 
     let mut node = BTreeMap::new();
     let mut root_layout = NodeSpec::default();
-    if let Some(global_nav_targets) = nav.get("GlobalNav") {
-        if !global_nav_targets.is_empty() {
-            root_layout.attrs.insert(
-                "nav".to_string(),
-                AttrValue::Vector(BTreeSet::from(["GlobalNav".to_string()])),
-            );
-        }
+    if !root_nav_ids.is_empty() {
+        root_layout
+            .attrs
+            .insert("nav".to_string(), AttrValue::Vector(root_nav_ids.clone()));
     }
     node.insert("RootLayout".to_string(), root_layout);
 
@@ -281,7 +274,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         if let Some(nav_ids) = nav_usage.get(&page.page_id) {
             let filtered = nav_ids
                 .iter()
-                .filter(|nav_id| nav_id.as_str() != "GlobalNav")
+                .filter(|nav_id| !root_nav_ids.contains(*nav_id))
                 .cloned()
                 .collect::<BTreeSet<_>>();
             if !filtered.is_empty() {
@@ -403,6 +396,9 @@ fn extract_nav_candidates(html: &Html, page_host: Option<&str>) -> Vec<NavCandid
                 let Some(path) = normalize_internal_href_to_path(href, page_host) else {
                     continue;
                 };
+                if !is_probably_page_path(&path) {
+                    continue;
+                }
                 let title = extract_link_title(&link, &path);
                 targets
                     .entry(path.clone())
@@ -543,15 +539,97 @@ fn infer_title_from_route(path: &str) -> String {
         .join(" ")
 }
 
+fn is_probably_page_path(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    let blocked_fragments = [
+        "/login",
+        "/logout",
+        "/signup",
+        "/signin",
+        "/register",
+        "/registration",
+        "/cgi-bin/",
+        "/cart",
+        "/checkout",
+        "/purchase",
+    ];
+    if blocked_fragments
+        .iter()
+        .any(|fragment| lowered.contains(fragment))
+    {
+        return false;
+    }
+    true
+}
+
 fn suggest_nav_id(label: &str) -> Option<String> {
     let lowered = label.to_ascii_lowercase();
     if lowered.contains("footer") {
         Some("FooterNav".to_string())
-    } else if lowered.contains("header") || lowered.contains("global") || lowered.contains("tab") {
+    } else if lowered.contains("account")
+        || lowered.contains("mypage")
+        || lowered.contains("my-page")
+    {
+        Some("AccountNav".to_string())
+    } else if lowered.contains("category") || lowered.contains("tab") {
+        Some("CategoryNav".to_string())
+    } else if lowered.contains("header") || lowered.contains("global") {
         Some("GlobalNav".to_string())
     } else {
         None
     }
+}
+
+fn classify_nav_cluster(
+    cluster: &NavCluster,
+    input_page_count: usize,
+    target_count: usize,
+) -> Option<String> {
+    if let Some(label_based) = cluster.label.as_deref().and_then(suggest_nav_id) {
+        return Some(label_based);
+    }
+
+    let category_like = cluster
+        .paths
+        .iter()
+        .filter(|path| {
+            path == &&"/" || path.starts_with("/category/") || path.starts_with("/promotion/event/")
+        })
+        .count();
+    let account_like = cluster
+        .paths
+        .iter()
+        .filter(|path| path.starts_with("/my"))
+        .count();
+
+    if account_like == cluster.paths.len() && account_like >= 2 {
+        return Some("AccountNav".to_string());
+    }
+    if category_like == cluster.paths.len() && category_like >= 2 {
+        return Some("CategoryNav".to_string());
+    }
+    if cluster.owners.len() == input_page_count && input_page_count > 1 {
+        return Some("GlobalNav".to_string());
+    }
+    if input_page_count == 1 && target_count >= 4 {
+        return Some("GlobalNav".to_string());
+    }
+    None
+}
+
+fn should_attach_nav_to_root_layout(
+    nav_id: &str,
+    cluster: &NavCluster,
+    input_page_count: usize,
+    target_count: usize,
+) -> bool {
+    if nav_id == "FooterNav" || nav_id == "AccountNav" {
+        return false;
+    }
+    if cluster.owners.len() == input_page_count && input_page_count > 0 {
+        return true;
+    }
+    input_page_count == 1 && target_count >= 4
 }
 
 fn allocate_nav_id(
@@ -1592,11 +1670,12 @@ node:
 
         let doc = scan_html_paths([&home]).expect("scan");
         validate_document(&doc).expect("validate scan result");
-        assert!(doc.nav.contains_key("GlobalNav"));
+        assert!(doc.nav.contains_key("CategoryNav"));
         assert!(doc.node.contains_key("ExampleShop"));
         assert!(doc.node.contains_key("Fashion"));
         assert!(doc.node.contains_key("Cosme"));
         assert!(doc.node.contains_key("Ranking"));
-        assert_eq!(doc.nav["GlobalNav"].len(), 4);
+        assert_eq!(doc.nav["CategoryNav"].len(), 4);
+        assert!(!doc.node["ExampleShop"].attrs.contains_key("nav"));
     }
 }

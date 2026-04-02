@@ -122,6 +122,8 @@ gui scan page1.html page2.html
 - `scan`: rendered HTML files を解析して `.gui` を stdout に出力
   - 高信頼の `nav` / `tablist` / `header` / `footer` から内部リンクを拾い、
     入力HTMLに無い page も stub として補完する
+  - `login` / `cart` / `checkout` など action 寄りの導線は page stub 化を抑制する
+  - link cluster の path 傾向から `CategoryNav` / `AccountNav` / `FooterNav` を推定する
 
 `scan` は HTML の取得や JavaScript 実行を行いません。入力は別ツールで保存した
 rendered HTML を想定します。設計メモは `spec/scan.md` にあります。
