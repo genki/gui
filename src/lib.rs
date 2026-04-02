@@ -61,6 +61,7 @@ struct ScannedPage {
     page_id: String,
     title: String,
     path: String,
+    breadcrumb_paths: Vec<String>,
     nav_candidates: Vec<NavCandidate>,
 }
 
@@ -155,6 +156,7 @@ where
     let pages = raw_pages
         .into_iter()
         .map(|(page_id, title, location, html)| ScannedPage {
+            breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
             nav_candidates: extract_nav_candidates(&html, location.host.as_deref()),
             page_id,
             title,
@@ -207,6 +209,7 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
                         page_id,
                         title: target.title.clone(),
                         path: target.path.clone(),
+                        breadcrumb_paths: Vec::new(),
                         nav_candidates: Vec::new(),
                     }
                 });
@@ -467,6 +470,35 @@ fn extract_nav_candidates(html: &Html, page_host: Option<&str>) -> Vec<NavCandid
             .eq(right.targets.iter().map(|target| target.path.as_str()))
     });
     candidates
+}
+
+fn extract_breadcrumb_paths(html: &Html, page_host: Option<&str>) -> Vec<String> {
+    let selectors = [
+        "nav[aria-label*='breadcrumb' i] a[href]",
+        "[role='navigation'][aria-label*='breadcrumb' i] a[href]",
+        "ol.breadcrumb a[href]",
+        "ul.breadcrumb a[href]",
+        "[data-testid*='breadcrumb' i] a[href]",
+    ];
+    for selector_text in selectors {
+        let selector = Selector::parse(selector_text).expect("breadcrumb selector");
+        let mut paths = Vec::new();
+        for link in html.select(&selector) {
+            let Some(href) = link.value().attr("href") else {
+                continue;
+            };
+            let Some(path) = normalize_internal_href_to_path(href, page_host) else {
+                continue;
+            };
+            if paths.last() != Some(&path) {
+                paths.push(path);
+            }
+        }
+        if !paths.is_empty() {
+            return paths;
+        }
+    }
+    Vec::new()
 }
 
 fn normalize_internal_href_to_path(href: &str, page_host: Option<&str>) -> Option<String> {
@@ -874,8 +906,13 @@ fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
     let mut parent_by_id = BTreeMap::<String, Option<String>>::new();
     for page in pages {
         let segments = split_path_segments(&page.path);
-        let parent = infer_drill_parent(&page.path, &segments, &page_id_by_path)
-            .filter(|parent_id| parent_id != &page.page_id);
+        let parent = infer_drill_parent(
+            &page.path,
+            &segments,
+            &page.breadcrumb_paths,
+            &page_id_by_path,
+        )
+        .filter(|parent_id| parent_id != &page.page_id);
         parent_by_id.insert(page.page_id.clone(), parent);
     }
 
@@ -913,10 +950,15 @@ fn build_drill_section(pages: &[ScannedPage]) -> TreeSection {
 fn infer_drill_parent(
     path: &str,
     segments: &[&str],
+    breadcrumb_paths: &[String],
     page_id_by_path: &BTreeMap<String, String>,
 ) -> Option<String> {
     if path == "/" || segments.is_empty() {
         return None;
+    }
+
+    if let Some(parent_id) = infer_breadcrumb_parent(path, breadcrumb_paths, page_id_by_path) {
+        return Some(parent_id);
     }
 
     if segments.len() >= 2 {
@@ -932,6 +974,21 @@ fn infer_drill_parent(
     }
 
     None
+}
+
+fn infer_breadcrumb_parent(
+    path: &str,
+    breadcrumb_paths: &[String],
+    page_id_by_path: &BTreeMap<String, String>,
+) -> Option<String> {
+    let current_index = breadcrumb_paths.iter().position(|item| item == path)?;
+    if current_index == 0 {
+        return None;
+    }
+    breadcrumb_paths[..current_index]
+        .iter()
+        .rev()
+        .find_map(|parent_path| page_id_by_path.get(parent_path).cloned())
 }
 
 fn build_drill_children(
@@ -1869,24 +1926,28 @@ node:
             page_id: "Home".to_string(),
             title: "Home".to_string(),
             path: "/".to_string(),
+            breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
         };
         let docs = ScannedPage {
             page_id: "Docs".to_string(),
             title: "Docs".to_string(),
             path: "/docs".to_string(),
+            breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
         };
         let guide = ScannedPage {
             page_id: "Guide".to_string(),
             title: "Guide".to_string(),
             path: "/docs/guide".to_string(),
+            breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
         };
         let advanced = ScannedPage {
             page_id: "Advanced".to_string(),
             title: "Advanced".to_string(),
             path: "/docs/category/advanced".to_string(),
+            breadcrumb_paths: Vec::new(),
             nav_candidates: Vec::new(),
         };
 
@@ -1986,5 +2047,41 @@ node:
         };
         assert_eq!(about_kind, "section");
         assert_eq!(apps_kind, "page");
+    }
+
+    #[test]
+    fn breadcrumb_parent_beats_path_prefix_parent() {
+        let root = ScannedPage {
+            page_id: "Docs".to_string(),
+            title: "Docs".to_string(),
+            path: "/docs".to_string(),
+            breadcrumb_paths: Vec::new(),
+            nav_candidates: Vec::new(),
+        };
+        let guide = ScannedPage {
+            page_id: "Guide".to_string(),
+            title: "Guide".to_string(),
+            path: "/docs/guide".to_string(),
+            breadcrumb_paths: vec!["/docs".to_string(), "/docs/guide".to_string()],
+            nav_candidates: Vec::new(),
+        };
+        let faq = ScannedPage {
+            page_id: "Faq".to_string(),
+            title: "Faq".to_string(),
+            path: "/docs/guide/faq".to_string(),
+            breadcrumb_paths: vec![
+                "/docs".to_string(),
+                "/docs/guide".to_string(),
+                "/docs/guide/faq".to_string(),
+            ],
+            nav_candidates: Vec::new(),
+        };
+
+        let drill = build_drill_section(&[root, guide, faq]);
+        let docs_children = drill.get("Docs").expect("docs root");
+        assert!(docs_children.contains(&TreeChild::Branch(
+            "Guide".to_string(),
+            vec![TreeChild::Leaf("Faq".to_string())],
+        )));
     }
 }
