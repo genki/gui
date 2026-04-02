@@ -1055,6 +1055,16 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     }
 
     for page in &scanned_pages {
+        for (step_id, step_label, is_active) in page_stepper_nodes(page) {
+            let mut attrs = BTreeMap::new();
+            attrs.insert("kind".to_string(), AttrValue::Scalar("wizard-step".to_string()));
+            attrs.insert("title".to_string(), AttrValue::Scalar(step_label));
+            attrs.insert(
+                "active".to_string(),
+                AttrValue::Scalar(if is_active { "true" } else { "false" }.to_string()),
+            );
+            node.insert(step_id, NodeSpec { attrs });
+        }
         for dialog in &page.dialogs {
             let mut attrs = BTreeMap::new();
             attrs.insert("kind".to_string(), AttrValue::Scalar("dialog".to_string()));
@@ -2331,6 +2341,10 @@ fn infer_layout_id_for_segment(segment: &str) -> String {
 }
 
 fn build_inherit_section(pages: &[ScannedPage], layout_groups: &[LayoutGroup]) -> TreeSection {
+    let page_by_id = pages
+        .iter()
+        .map(|page| (page.page_id.clone(), page))
+        .collect::<BTreeMap<_, _>>();
     let mut claimed_pages = BTreeSet::new();
     let mut children = Vec::new();
 
@@ -2338,10 +2352,11 @@ fn build_inherit_section(pages: &[ScannedPage], layout_groups: &[LayoutGroup]) -
         let mut members = group.members.iter().cloned().collect::<Vec<_>>();
         members.sort();
         claimed_pages.extend(members.iter().cloned());
-        children.push(TreeChild::Branch(
-            group.layout_id.clone(),
-            members.into_iter().map(TreeChild::Leaf).collect(),
-        ));
+        let member_nodes = members
+            .into_iter()
+            .map(|page_id| inherit_page_child(&page_id, &page_by_id))
+            .collect();
+        children.push(TreeChild::Branch(group.layout_id.clone(), member_nodes));
     }
 
     let mut root_pages = pages
@@ -2350,9 +2365,26 @@ fn build_inherit_section(pages: &[ScannedPage], layout_groups: &[LayoutGroup]) -
         .filter(|page_id| !claimed_pages.contains(page_id))
         .collect::<Vec<_>>();
     root_pages.sort();
-    children.extend(root_pages.into_iter().map(TreeChild::Leaf));
+    children.extend(
+        root_pages
+            .into_iter()
+            .map(|page_id| inherit_page_child(&page_id, &page_by_id)),
+    );
 
     BTreeMap::from([("RootLayout".to_string(), children)])
+}
+
+fn inherit_page_child(page_id: &str, page_by_id: &BTreeMap<String, &ScannedPage>) -> TreeChild {
+    let Some(page) = page_by_id.get(page_id) else {
+        return TreeChild::Leaf(page_id.to_string());
+    };
+    let stepper_nodes = page_stepper_nodes(page);
+    let nested = build_stepper_tree(&stepper_nodes);
+    if nested.is_empty() {
+        TreeChild::Leaf(page_id.to_string())
+    } else {
+        TreeChild::Branch(page_id.to_string(), nested)
+    }
 }
 
 fn normalize_path(path: &str) -> String {
@@ -2501,6 +2533,37 @@ fn snapshot_step_rank(page: &ScannedPage) -> usize {
     }
 }
 
+fn page_stepper_nodes(page: &ScannedPage) -> Vec<(String, String, bool)> {
+    let Some(stepper) = page.steppers.first() else {
+        return Vec::new();
+    };
+    stepper
+        .labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            (
+                format!("{}Step{}", page.page_id, index + 1),
+                label.clone(),
+                stepper.active_label.as_ref() == Some(label),
+            )
+        })
+        .collect()
+}
+
+fn build_stepper_tree(children: &[(String, String, bool)]) -> Vec<TreeChild> {
+    if let Some((first_id, _, _)) = children.first() {
+        let nested = build_stepper_tree(&children[1..]);
+        if nested.is_empty() {
+            vec![TreeChild::Leaf(first_id.clone())]
+        } else {
+            vec![TreeChild::Branch(first_id.clone(), nested)]
+        }
+    } else {
+        Vec::new()
+    }
+}
+
 fn infer_drill_parent(
     path: &str,
     segments: &[&str],
@@ -2550,19 +2613,22 @@ fn build_drill_children(
     children_by_parent: &BTreeMap<String, Vec<String>>,
     pages_by_id: &BTreeMap<String, &ScannedPage>,
 ) -> Vec<TreeChild> {
+    let mut out = Vec::new();
     let mut children = children_by_parent.get(page_id).cloned().unwrap_or_default();
     children.sort_by_key(|child| pages_by_id.get(child).map(|page| page.path.clone()));
-    children
-        .into_iter()
-        .map(|child| {
-            let nested = build_drill_children(&child, children_by_parent, pages_by_id);
-            if nested.is_empty() {
-                TreeChild::Leaf(child)
-            } else {
-                TreeChild::Branch(child, nested)
-            }
-        })
-        .collect()
+    for child in children {
+        let nested = build_drill_children(&child, children_by_parent, pages_by_id);
+        if nested.is_empty() {
+            out.push(TreeChild::Leaf(child));
+        } else {
+            out.push(TreeChild::Branch(child, nested));
+        }
+    }
+    if let Some(page) = pages_by_id.get(page_id) {
+        let stepper_nodes = page_stepper_nodes(page);
+        out.extend(build_stepper_tree(&stepper_nodes));
+    }
+    out
 }
 
 fn collect_section_page_ids(section: &TreeSection) -> BTreeSet<String> {
