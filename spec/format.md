@@ -6,7 +6,7 @@ Each GUI model is defined by four main parts:
 
 - `drill`: a forest for semantic drill-down in the information space
 - `inherit`: a forest for visual or behavioral inheritance
-- `nav`: named ordered target page lists
+- `nav`: named target page sets
 - `node`: attributed nodes keyed by node id
 
 Every `inherit` leaf is a page.
@@ -16,6 +16,13 @@ or templates.
 
 Any node may declare attributes such as `path`, `nav`, `title`, or future
 capabilities. Those attributes are inherited through the `inherit` forest.
+
+Attribute inheritance follows these rules:
+
+- scalar attributes override inherited values
+- vector attributes merge by set union
+
+`nav` is a vector attribute and is unordered at the language level.
 
 The model intentionally does not require a top-level `transitions` section.
 Many practical transitions are derived from:
@@ -55,10 +62,11 @@ node:
 - a non-leaf `inherit` node is not necessarily a page.
 - a non-leaf `inherit` node may represent a layout, shell, or template.
 - a page may appear in at most one place in the `drill` forest.
-- each `nav` entry is an ordered page id list.
+- each `nav` entry is a page id set.
 - any node may define attributes.
-- `node.nav` is a set or ordered list of nav ids.
-- inherited attributes merge downward unless overridden by a child node.
+- `node.nav` is a nav id set.
+- scalar attributes override.
+- vector attributes merge by set union.
 - attributes implied only by inheritance need not be restated on child nodes.
 - `groups` is optional and may overlap.
 
@@ -83,3 +91,4 @@ foo:
 - `inherit` answers: what does this page share?
 - `drill` answers: what is this page drilling into?
 - `nav` answers: where can this shared navigator take the user?
+- ordering is intentionally outside the core language model.

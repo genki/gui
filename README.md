@@ -7,13 +7,18 @@ Declarative `.gui` format for modeling GUI structure with two forests:
 
 The format treats `nav` as a first-class shared component.
 
-- a `nav` is a named ordered target page list
+- a `nav` is a named target page set
 - any `node` may declare attributes such as `path` or `nav`
 - those attributes are inherited through `inherit`
 - every `inherit` leaf is a page
 - every node that appears in `drill` is a page
 - non-leaf `inherit` nodes may be layouts or shells
+- scalar attributes override inherited values
+- vector attributes merge by set union
 - many apparent transitions are derived from `drill` and `nav`
+
+In this abstract language, `nav` is unordered. Concrete UI layers may choose an
+ordering or spatial arrangement such as tabs, side menus, or ring menus.
 
 ## Example
 
