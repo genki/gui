@@ -91,9 +91,12 @@ leaf は `Page:` のように null child で表現でき、loader/preparser は 
 
 ## Repository layout
 
+- `docs/`: reader-friendly guides and workflow documentation
 - `examples/`: sample `.gui` files
 - `spec/`: draft format specification
 - `spec/scan.md`: design draft for future `gui scan` HTML-to-GUI pipeline
+
+Start with [`docs/README.md`](./docs/README.md) if you want the guided version.
 
 ## CLI
 
