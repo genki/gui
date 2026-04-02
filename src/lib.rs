@@ -265,6 +265,8 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
     }
 
     let layout_groups = infer_layout_groups(&scanned_pages);
+    let drill = build_drill_section(&scanned_pages);
+    let section_page_ids = collect_section_page_ids(&drill);
 
     let mut node = BTreeMap::new();
     let mut root_layout = NodeSpec::default();
@@ -299,7 +301,12 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
 
     for page in &scanned_pages {
         let mut attrs = BTreeMap::new();
-        attrs.insert("kind".to_string(), AttrValue::Scalar("page".to_string()));
+        let kind = if section_page_ids.contains(&page.page_id) {
+            "section"
+        } else {
+            "page"
+        };
+        attrs.insert("kind".to_string(), AttrValue::Scalar(kind.to_string()));
         attrs.insert("title".to_string(), AttrValue::Scalar(page.title.clone()));
         attrs.insert("path".to_string(), AttrValue::Scalar(page.path.clone()));
         if let Some(nav_ids) = nav_usage.get(&page.page_id) {
@@ -315,7 +322,6 @@ fn document_from_scanned_pages(pages: &[ScannedPage]) -> Document {
         node.insert(page.page_id.clone(), NodeSpec { attrs });
     }
 
-    let drill = build_drill_section(&scanned_pages);
     let inherit = build_inherit_section(&scanned_pages, &layout_groups);
 
     Document {
@@ -946,6 +952,26 @@ fn build_drill_children(
             }
         })
         .collect()
+}
+
+fn collect_section_page_ids(section: &TreeSection) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (root, children) in section {
+        if !children.is_empty() {
+            out.insert(root.clone());
+        }
+        collect_section_page_ids_from_children(children, &mut out);
+    }
+    out
+}
+
+fn collect_section_page_ids_from_children(children: &[TreeChild], out: &mut BTreeSet<String>) {
+    for child in children {
+        if let TreeChild::Branch(id, nested) = child {
+            out.insert(id.clone());
+            collect_section_page_ids_from_children(nested, out);
+        }
+    }
 }
 
 fn split_path_segments(path: &str) -> Vec<&str> {
@@ -1616,7 +1642,7 @@ mod tests {
 
     use super::{
         build_drill_section, load_document_from_path, load_documents_from_paths, parse_document,
-        render_document, scan_html_paths, validate_document, ScannedPage, TreeChild,
+        render_document, scan_html_paths, validate_document, AttrValue, ScannedPage, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -1906,5 +1932,59 @@ node:
         assert!(doc.node.contains_key("Docs"));
         assert!(!doc.node.contains_key("Login"));
         assert!(!doc.node.contains_key("Cart"));
+    }
+
+    #[test]
+    fn scan_marks_branch_pages_as_sections() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-scan-section-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let about = dir.join("about.html");
+        let apps = dir.join("apps.html");
+        fs::write(
+            &about,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>About</title>
+    <link rel="canonical" href="https://example.test/about" />
+  </head>
+  <body>
+    <nav aria-label="about nav">
+      <a href="https://example.test/about">About</a>
+      <a href="https://example.test/about/apps">Applications</a>
+    </nav>
+  </body>
+</html>"#,
+        )
+        .expect("write about");
+        fs::write(
+            &apps,
+            r#"<!doctype html>
+<html>
+  <head>
+    <title>Applications</title>
+    <link rel="canonical" href="https://example.test/about/apps" />
+  </head>
+  <body><main>Applications</main></body>
+</html>"#,
+        )
+        .expect("write apps");
+
+        let doc = scan_html_paths([&about, &apps]).expect("scan");
+        validate_document(&doc).expect("validate scan result");
+        let about_kind = match doc.node["About"].attrs.get("kind") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        let apps_kind = match doc.node["Applications"].attrs.get("kind") {
+            Some(AttrValue::Scalar(value)) => value.as_str(),
+            _ => "",
+        };
+        assert_eq!(about_kind, "section");
+        assert_eq!(apps_kind, "page");
     }
 }
