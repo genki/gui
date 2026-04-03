@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use regex::Regex;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
@@ -69,6 +70,8 @@ struct ScannedPage {
     opens: BTreeSet<String>,
     controls: Vec<ScannedControl>,
     steppers: Vec<ScannedStepper>,
+    images: Vec<ScannedImage>,
+    lists: Vec<ScannedList>,
     snapshot_id: Option<String>,
     snapshot_url: Option<String>,
     snapshot_actions: Vec<String>,
@@ -80,6 +83,7 @@ struct NavCandidate {
     label: Option<String>,
     targets: Vec<ScannedTarget>,
     score: i32,
+    dynamic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +139,21 @@ struct ScannedControl {
     expanded: bool,
     disabled: bool,
     checked: bool,
+    dynamic: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScannedImage {
+    src: String,
+    label: Option<String>,
+    dynamic: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScannedList {
+    label: Option<String>,
+    item_count: usize,
+    dynamic: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +198,8 @@ struct ScanSummaryPage {
     nav_candidates: Vec<ScanSummaryNavCandidate>,
     controls: Vec<ScannedControl>,
     steppers: Vec<ScannedStepper>,
+    images: Vec<ScannedImage>,
+    lists: Vec<ScannedList>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,6 +213,7 @@ struct ScanSummaryDialog {
 struct ScanSummaryNavCandidate {
     label: Option<String>,
     targets: Vec<String>,
+    dynamic: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +247,8 @@ pub struct ScanConfig {
     pub stepper: StepperScanConfig,
     #[serde(default)]
     pub snapshot: SnapshotScanConfig,
+    #[serde(default)]
+    pub compare: CompareScanConfig,
 }
 
 impl Default for ScanConfig {
@@ -232,6 +256,7 @@ impl Default for ScanConfig {
         Self {
             stepper: StepperScanConfig::default(),
             snapshot: SnapshotScanConfig::default(),
+            compare: CompareScanConfig::default(),
         }
     }
 }
@@ -266,6 +291,33 @@ impl Default for StepperScanConfig {
             semantic_hint_tokens: default_stepper_semantic_hint_tokens(),
         }
     }
+}
+
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompareScanConfig {
+    #[serde(default)]
+    pub dynamic_selectors: Vec<String>,
+    #[serde(default)]
+    pub dynamic_text_patterns: Vec<String>,
+    #[serde(default)]
+    pub normalize_patterns: Vec<NormalizePatternConfig>,
+}
+
+impl Default for CompareScanConfig {
+    fn default() -> Self {
+        Self {
+            dynamic_selectors: Vec::new(),
+            dynamic_text_patterns: Vec::new(),
+            normalize_patterns: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NormalizePatternConfig {
+    pub pattern: String,
+    pub replacement: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -404,11 +456,13 @@ where
         let location = extract_page_location(&html, path_ref);
         let dialogs = extract_dialogs(&html, &title);
         let opens = extract_dialog_opens(&html, &dialogs);
-        let controls = extract_controls(&html);
+        let controls = extract_controls(&html, config);
         let steppers = extract_steppers(&html, config);
+        let images = extract_images(&html, config);
+        let lists = extract_lists(&html, config);
         scanned_pages.push(ScannedPage {
             breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
-            nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path),
+            nav_candidates: extract_nav_candidates(&html, location.host.as_deref(), &location.path, config),
             has_docs_index_candidate: has_large_docs_index_candidate(
                 &html,
                 location.host.as_deref(),
@@ -418,6 +472,8 @@ where
             opens,
             controls,
             steppers,
+            images,
+            lists,
             snapshot_id: input.snapshot_id,
             snapshot_url: input.snapshot_url,
             snapshot_actions: input.snapshot_actions,
@@ -571,10 +627,13 @@ fn build_scan_summary(pages: &[ScannedPage]) -> ScanSummary {
                             .iter()
                             .map(|target| target.path.clone())
                             .collect(),
+                        dynamic: candidate.dynamic,
                     })
                     .collect(),
                 controls: page.controls.clone(),
                 steppers: page.steppers.clone(),
+                images: page.images.clone(),
+                lists: page.lists.clone(),
             })
             .collect(),
     }
@@ -606,6 +665,7 @@ where
     Ok(compare_scan_summaries(
         &left_result.summary,
         &right_result.summary,
+        config,
     ))
 }
 
@@ -632,7 +692,7 @@ pub fn render_compare_report(report: &CompareReport) -> String {
     out
 }
 
-fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary) -> CompareReport {
+fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary, config: &ScanConfig) -> CompareReport {
     let mut findings = Vec::new();
     let left_pages = left
         .pages
@@ -668,9 +728,11 @@ fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary) -> CompareRep
         };
         compare_page_hints(key, left_page, right_page, &mut findings);
         compare_page_dialogs(key, left_page, right_page, &mut findings);
-        compare_page_controls(key, left_page, right_page, &mut findings);
+        compare_page_controls(key, left_page, right_page, &mut findings, config);
         compare_page_steppers(key, left_page, right_page, &mut findings);
-        compare_page_nav(key, left_page, right_page, &mut findings);
+        compare_page_nav(key, left_page, right_page, &mut findings, config);
+        compare_page_images(key, left_page, right_page, &mut findings, config);
+        compare_page_lists(key, left_page, right_page, &mut findings, config);
     }
 
     findings.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.message.cmp(&b.message)));
@@ -754,29 +816,30 @@ fn compare_page_controls(
     left: &ScanSummaryPage,
     right: &ScanSummaryPage,
     findings: &mut Vec<CompareFinding>,
+    config: &ScanConfig,
 ) {
     let left_controls = left
         .controls
         .iter()
-        .map(|control| (control_key(control), control))
+        .map(|control| (control_key(control, config), control))
         .collect::<BTreeMap<_, _>>();
     let right_controls = right
         .controls
         .iter()
-        .map(|control| (control_key(control), control))
+        .map(|control| (control_key(control, config), control))
         .collect::<BTreeMap<_, _>>();
-    for control_key_name in left_controls.keys() {
+    for (control_key_name, left_control) in &left_controls {
         if !right_controls.contains_key(control_key_name) {
             findings.push(CompareFinding {
-                kind: "missing-control".to_string(),
+                kind: if left_control.dynamic { "dynamic-missing-control" } else { "missing-control" }.to_string(),
                 message: format!("state `{key}` で right に control `{control_key_name}` が無い"),
             });
         }
     }
-    for control_key_name in right_controls.keys() {
+    for (control_key_name, right_control) in &right_controls {
         if !left_controls.contains_key(control_key_name) {
             findings.push(CompareFinding {
-                kind: "unexpected-control".to_string(),
+                kind: if right_control.dynamic { "dynamic-unexpected-control" } else { "unexpected-control" }.to_string(),
                 message: format!(
                     "state `{key}` で right にのみ control `{control_key_name}` がある"
                 ),
@@ -789,7 +852,7 @@ fn compare_page_controls(
         };
         for mismatch in compare_control_signals(left_control, right_control) {
             findings.push(CompareFinding {
-                kind: "signal-mismatch".to_string(),
+                kind: if left_control.dynamic || right_control.dynamic { "dynamic-signal-mismatch" } else { "signal-mismatch" }.to_string(),
                 message: format!("state `{key}` の control `{control_key_name}` で {mismatch}"),
             });
         }
@@ -839,13 +902,14 @@ fn compare_page_nav(
     left: &ScanSummaryPage,
     right: &ScanSummaryPage,
     findings: &mut Vec<CompareFinding>,
+    config: &ScanConfig,
 ) {
     let left_nav_labels = left
         .nav_candidates
         .iter()
         .fold(BTreeMap::<BTreeSet<String>, BTreeSet<String>>::new(), |mut acc, candidate| {
             let targets = candidate.targets.iter().cloned().collect::<BTreeSet<_>>();
-            let label = candidate.label.clone().unwrap_or_default();
+            let label = normalize_compare_text(candidate.label.clone().unwrap_or_default(), config);
             acc.entry(targets).or_default().insert(label);
             acc
         });
@@ -854,7 +918,7 @@ fn compare_page_nav(
         .iter()
         .fold(BTreeMap::<BTreeSet<String>, BTreeSet<String>>::new(), |mut acc, candidate| {
             let targets = candidate.targets.iter().cloned().collect::<BTreeSet<_>>();
-            let label = candidate.label.clone().unwrap_or_default();
+            let label = normalize_compare_text(candidate.label.clone().unwrap_or_default(), config);
             acc.entry(targets).or_default().insert(label);
             acc
         });
@@ -869,8 +933,9 @@ fn compare_page_nav(
         .map(|candidate| candidate.targets.iter().cloned().collect::<BTreeSet<_>>())
         .collect::<BTreeSet<_>>();
     for targets in left_nav.difference(&right_nav) {
+        let is_dynamic = left.nav_candidates.iter().any(|candidate| candidate.dynamic && candidate.targets.iter().map(|target| target.clone()).collect::<BTreeSet<_>>() == *targets);
         findings.push(CompareFinding {
-            kind: "nav-mismatch".to_string(),
+            kind: if is_dynamic { "dynamic-nav-mismatch" } else { "nav-mismatch" }.to_string(),
             message: format!(
                 "state `{key}` で right に nav target set {:?} が無い",
                 targets
@@ -878,8 +943,9 @@ fn compare_page_nav(
         });
     }
     for targets in right_nav.difference(&left_nav) {
+        let is_dynamic = right.nav_candidates.iter().any(|candidate| candidate.dynamic && candidate.targets.iter().map(|target| target.clone()).collect::<BTreeSet<_>>() == *targets);
         findings.push(CompareFinding {
-            kind: "unexpected-nav".to_string(),
+            kind: if is_dynamic { "dynamic-unexpected-nav" } else { "unexpected-nav" }.to_string(),
             message: format!(
                 "state `{key}` で right にのみ nav target set {:?} がある",
                 targets
@@ -890,8 +956,10 @@ fn compare_page_nav(
         let left_labels = left_nav_labels.get(targets).cloned().unwrap_or_default();
         let right_labels = right_nav_labels.get(targets).cloned().unwrap_or_default();
         if left_labels != right_labels {
+            let left_dynamic = left.nav_candidates.iter().any(|candidate| candidate.dynamic && candidate.targets.iter().map(|target| target.clone()).collect::<BTreeSet<_>>() == *targets);
+            let right_dynamic = right.nav_candidates.iter().any(|candidate| candidate.dynamic && candidate.targets.iter().map(|target| target.clone()).collect::<BTreeSet<_>>() == *targets);
             findings.push(CompareFinding {
-                kind: "nav-label-mismatch".to_string(),
+                kind: if left_dynamic || right_dynamic { "dynamic-nav-label-mismatch" } else { "nav-label-mismatch" }.to_string(),
                 message: format!(
                     "state `{key}` の nav target set {:?} で label が不一致: left={:?} right={:?}",
                     targets, left_labels, right_labels
@@ -901,8 +969,81 @@ fn compare_page_nav(
     }
 }
 
-fn control_key(control: &ScannedControl) -> String {
-    format!("{}:{}", control.kind, control.label)
+fn compare_page_images(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+    config: &ScanConfig,
+) {
+    let left_images = left.images.iter().map(|image| (image_key(image, config), image)).collect::<BTreeMap<_, _>>();
+    let right_images = right.images.iter().map(|image| (image_key(image, config), image)).collect::<BTreeMap<_, _>>();
+    for (image_key_name, left_image) in &left_images {
+        if !right_images.contains_key(image_key_name) {
+            findings.push(CompareFinding {
+                kind: if left_image.dynamic { "dynamic-missing-image" } else { "missing-image" }.to_string(),
+                message: format!("state `{key}` で right に image `{image_key_name}` が無い"),
+            });
+        }
+    }
+    for (image_key_name, right_image) in &right_images {
+        if !left_images.contains_key(image_key_name) {
+            findings.push(CompareFinding {
+                kind: if right_image.dynamic { "dynamic-unexpected-image" } else { "unexpected-image" }.to_string(),
+                message: format!("state `{key}` で right にのみ image `{image_key_name}` がある"),
+            });
+        }
+    }
+}
+
+fn compare_page_lists(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+    config: &ScanConfig,
+) {
+    let left_lists = left.lists.iter().map(|list| (list_key(list, config), list)).collect::<BTreeMap<_, _>>();
+    let right_lists = right.lists.iter().map(|list| (list_key(list, config), list)).collect::<BTreeMap<_, _>>();
+    for (list_key_name, left_list) in &left_lists {
+        let Some(right_list) = right_lists.get(list_key_name) else {
+            findings.push(CompareFinding {
+                kind: if left_list.dynamic { "dynamic-missing-list" } else { "missing-list" }.to_string(),
+                message: format!("state `{key}` で right に list `{list_key_name}` が無い"),
+            });
+            continue;
+        };
+        if left_list.item_count != right_list.item_count {
+            findings.push(CompareFinding {
+                kind: if left_list.dynamic || right_list.dynamic { "dynamic-list-length-mismatch" } else { "list-length-mismatch" }.to_string(),
+                message: format!("state `{key}` の list `{list_key_name}` で item_count が不一致: left={} right={}", left_list.item_count, right_list.item_count),
+            });
+        }
+    }
+    for (list_key_name, right_list) in &right_lists {
+        if !left_lists.contains_key(list_key_name) {
+            findings.push(CompareFinding {
+                kind: if right_list.dynamic { "dynamic-unexpected-list" } else { "unexpected-list" }.to_string(),
+                message: format!("state `{key}` で right にのみ list `{list_key_name}` がある"),
+            });
+        }
+    }
+}
+
+fn control_key(control: &ScannedControl, config: &ScanConfig) -> String {
+    format!("{}:{}", control.kind, normalize_compare_text(control.label.clone(), config))
+}
+
+fn image_key(image: &ScannedImage, config: &ScanConfig) -> String {
+    format!(
+        "{}:{}",
+        normalize_compare_text(image.label.clone().unwrap_or_default(), config),
+        normalize_compare_text(image.src.clone(), config)
+    )
+}
+
+fn list_key(list: &ScannedList, config: &ScanConfig) -> String {
+    normalize_compare_text(list.label.clone().unwrap_or_default(), config)
 }
 
 fn compare_control_signals(left: &ScannedControl, right: &ScannedControl) -> Vec<String> {
@@ -938,6 +1079,111 @@ fn compare_control_signals(left: &ScannedControl, right: &ScannedControl) -> Vec
         ));
     }
     out
+}
+
+fn normalize_compare_text(value: String, config: &ScanConfig) -> String {
+    let mut normalized = value;
+    for (pattern, replacement) in built_in_normalize_patterns()
+        .into_iter()
+        .chain(load_custom_normalize_patterns(config))
+    {
+        normalized = pattern.replace_all(&normalized, replacement.as_str()).into_owned();
+    }
+    collapse_text(normalized)
+}
+
+fn is_dynamic_text(value: &str, config: &ScanConfig) -> bool {
+    if collapse_text(value.to_string()).is_empty() {
+        return false;
+    }
+    built_in_dynamic_patterns()
+        .into_iter()
+        .chain(load_custom_dynamic_patterns(config))
+        .any(|pattern| pattern.is_match(value))
+}
+
+fn built_in_normalize_patterns() -> Vec<(Regex, String)> {
+    vec![
+        (
+            Regex::new(r#"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#)
+                .expect("uuid regex"),
+            "<UUID>".to_string(),
+        ),
+        (
+            Regex::new(r#"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}"#).expect("email regex"),
+            "<EMAIL>".to_string(),
+        ),
+        (
+            Regex::new(r#"https?://[^\s)\]>'"]+"#).expect("url regex"),
+            "<URL>".to_string(),
+        ),
+        (
+            Regex::new(r#"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b"#).expect("date regex"),
+            "<DATE>".to_string(),
+        ),
+        (
+            Regex::new(r#"\b\d{1,2}:\d{2}(?::\d{2})?\b"#).expect("time regex"),
+            "<TIME>".to_string(),
+        ),
+    ]
+}
+
+fn built_in_dynamic_patterns() -> Vec<Regex> {
+    vec![
+        Regex::new(r#"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#)
+            .expect("uuid regex"),
+        Regex::new(r#"(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}"#).expect("email regex"),
+        Regex::new(r#"https?://[^\s)\]>'"]+"#).expect("url regex"),
+        Regex::new(r#"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b"#).expect("date regex"),
+        Regex::new(r#"\b\d{1,2}:\d{2}(?::\d{2})?\b"#).expect("time regex"),
+        Regex::new(r#"\b\d{2,}\b"#).expect("number regex"),
+    ]
+}
+
+fn load_custom_normalize_patterns(config: &ScanConfig) -> Vec<(Regex, String)> {
+    config
+        .compare
+        .normalize_patterns
+        .iter()
+        .filter_map(|entry| {
+            Regex::new(&entry.pattern)
+                .ok()
+                .map(|regex| (regex, entry.replacement.clone()))
+        })
+        .collect()
+}
+
+fn load_custom_dynamic_patterns(config: &ScanConfig) -> Vec<Regex> {
+    config
+        .compare
+        .dynamic_text_patterns
+        .iter()
+        .filter_map(|pattern| Regex::new(pattern).ok())
+        .collect()
+}
+
+fn is_dynamic_element(
+    html: &Html,
+    element: &scraper::ElementRef<'_>,
+    config: &ScanConfig,
+) -> bool {
+    if config.compare.dynamic_selectors.is_empty() {
+        return false;
+    }
+    let element_html = element.html();
+    config.compare.dynamic_selectors.iter().any(|selector_text| {
+        Selector::parse(selector_text)
+            .ok()
+            .map(|selector| html.select(&selector).any(|candidate| candidate.html() == element_html))
+            .unwrap_or(false)
+    })
+}
+
+fn looks_like_dynamic_list_label(label: &str) -> bool {
+    let lowered = label.to_ascii_lowercase();
+    ["list", "feed", "grid", "table", "results", "items", "rows"]
+        .iter()
+        .any(|token| lowered.contains(token))
 }
 
 fn normalize_scanned_pages(pages: Vec<ScannedPage>) -> Vec<ScannedPage> {
@@ -1018,6 +1264,12 @@ fn merge_scanned_page(into: &mut ScannedPage, from: ScannedPage) {
     if into.steppers.is_empty() {
         into.steppers = from.steppers.clone();
     }
+    if into.images.is_empty() {
+        into.images = from.images.clone();
+    }
+    if into.lists.is_empty() {
+        into.lists = from.lists.clone();
+    }
 }
 
 fn dedupe_nav_candidates(candidates: Vec<NavCandidate>) -> Vec<NavCandidate> {
@@ -1039,6 +1291,7 @@ fn dedupe_nav_candidates(candidates: Vec<NavCandidate>) -> Vec<NavCandidate> {
                 if existing.label.is_none() {
                     existing.label = candidate.label;
                 }
+                existing.dynamic |= candidate.dynamic;
             }
             None => {
                 merged.insert(key, candidate);
@@ -1126,6 +1379,8 @@ fn document_from_scanned_pages(pages: &[ScannedPage], config: &ScanConfig) -> Do
                         opens: BTreeSet::new(),
                         controls: Vec::new(),
                         steppers: Vec::new(),
+                        images: Vec::new(),
+                        lists: Vec::new(),
                         snapshot_id: None,
                         snapshot_url: None,
                         snapshot_actions: Vec::new(),
@@ -1688,7 +1943,7 @@ fn looks_like_stepper_label(label: &str, config: &StepperScanConfig) -> bool {
     has_alpha_numeric && !punctuation_like
 }
 
-fn extract_controls(html: &Html) -> Vec<ScannedControl> {
+fn extract_controls(html: &Html, config: &ScanConfig) -> Vec<ScannedControl> {
     let selector = Selector::parse(
         "button, [role='button'], [role='tab'], [role='switch'], input[type='button'], input[type='submit']",
     )
@@ -1710,9 +1965,10 @@ fn extract_controls(html: &Html) -> Vec<ScannedControl> {
             || matches!(element.value().attr("aria-disabled"), Some("true"));
         let checked = element.value().attr("checked").is_some()
             || matches!(element.value().attr("aria-checked"), Some("true"));
+        let dynamic = is_dynamic_element(html, &element, config) || is_dynamic_text(&label, config);
         let fingerprint = format!(
-            "{}|{}|{}|{}|{}|{}|{}",
-            kind, label, active, selected, expanded, disabled, checked
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            kind, label, active, selected, expanded, disabled, checked, dynamic
         );
         if !seen.insert(fingerprint) {
             continue;
@@ -1725,6 +1981,7 @@ fn extract_controls(html: &Html) -> Vec<ScannedControl> {
             expanded,
             disabled,
             checked,
+            dynamic,
         });
     }
     controls
@@ -1764,10 +2021,96 @@ fn classify_control_kind(element: &scraper::ElementRef<'_>) -> String {
     "button".to_string()
 }
 
+fn extract_images(html: &Html, config: &ScanConfig) -> Vec<ScannedImage> {
+    let selector = Selector::parse("img[src]").expect("image selector");
+    let mut images = Vec::new();
+    let mut seen = BTreeSet::new();
+    for element in html.select(&selector) {
+        let Some(src) = element.value().attr("src").map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let label = ["alt", "aria-label", "title"]
+            .iter()
+            .find_map(|attr| element.value().attr(attr))
+            .map(|value| collapse_text(value.to_string()))
+            .filter(|value| !value.is_empty());
+        let dynamic = is_dynamic_element(html, &element, config)
+            || is_dynamic_text(src, config)
+            || label.as_deref().map(|value| is_dynamic_text(value, config)).unwrap_or(false);
+        let fingerprint = format!("{}|{}|{}", src, label.clone().unwrap_or_default(), dynamic);
+        if !seen.insert(fingerprint) {
+            continue;
+        }
+        images.push(ScannedImage {
+            src: src.to_string(),
+            label,
+            dynamic,
+        });
+    }
+    images
+}
+
+fn extract_lists(html: &Html, config: &ScanConfig) -> Vec<ScannedList> {
+    let selectors = [
+        "ul",
+        "ol",
+        "tbody",
+        "[role='list']",
+        "[class*='list']",
+        "[class*='grid']",
+        "[data-list]",
+    ];
+    let mut lists = Vec::new();
+    let mut seen = BTreeSet::new();
+    for selector_text in selectors {
+        let selector = Selector::parse(selector_text).expect("list selector");
+        for element in html.select(&selector) {
+            let children = element
+                .children()
+                .filter_map(scraper::ElementRef::wrap)
+                .filter(|child| {
+                    let name = child.value().name();
+                    !matches!(name, "script" | "style" | "template")
+                })
+                .collect::<Vec<_>>();
+            if children.len() < 2 {
+                continue;
+            }
+            let repeated_tags = children.iter().map(|child| child.value().name()).collect::<Vec<_>>();
+            let same_tag_count = repeated_tags
+                .first()
+                .map(|first| repeated_tags.iter().filter(|name| *name == first).count())
+                .unwrap_or(0);
+            if same_tag_count < 2 {
+                continue;
+            }
+            let label = extract_container_label(&element);
+            let dynamic = is_dynamic_element(html, &element, config)
+                || label.as_deref().map(looks_like_dynamic_list_label).unwrap_or(false)
+                || children.iter().filter_map(|child| {
+                    let text = collapse_text(child.text().collect::<String>());
+                    (!text.is_empty()).then_some(text)
+                }).any(|text| is_dynamic_text(&text, config));
+            let item_count = children.len();
+            let fingerprint = format!("{}|{}|{}", label.clone().unwrap_or_default(), item_count, dynamic);
+            if !seen.insert(fingerprint) {
+                continue;
+            }
+            lists.push(ScannedList {
+                label,
+                item_count,
+                dynamic,
+            });
+        }
+    }
+    lists
+}
+
 fn extract_nav_candidates(
     html: &Html,
     page_host: Option<&str>,
     page_path: &str,
+    config: &ScanConfig,
 ) -> Vec<NavCandidate> {
     let selectors = [
         "aside",
@@ -1814,10 +2157,17 @@ fn extract_nav_candidates(
             let meta = NavCandidateMeta {
                 selector: selector_text.to_string(),
             };
+            let label = extract_container_label(&container);
+            let dynamic = is_dynamic_element(html, &container, config)
+                || label
+                    .as_deref()
+                    .map(|value| is_dynamic_text(value, config))
+                    .unwrap_or(false);
             let candidate = NavCandidate {
-                label: extract_container_label(&container),
+                label,
                 targets: targets.into_values().collect(),
                 score: score_nav_candidate(&container, &meta),
+                dynamic,
             };
             if !candidate.targets.is_empty()
                 && !should_skip_nav_candidate(&candidate, &meta, page_path)
@@ -2213,6 +2563,7 @@ fn has_large_docs_index_candidate(html: &Html, page_host: Option<&str>, page_pat
                         selector: selector_text.to_string(),
                     },
                 ),
+                dynamic: false,
             };
             if is_docs_index_candidate(&candidate, page_path) {
                 return true;
@@ -4010,6 +4361,8 @@ node:
             opens: BTreeSet::new(),
             controls: Vec::new(),
             steppers: Vec::new(),
+            images: Vec::new(),
+            lists: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -4026,6 +4379,8 @@ node:
             opens: BTreeSet::new(),
             controls: Vec::new(),
             steppers: Vec::new(),
+            images: Vec::new(),
+            lists: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -4042,6 +4397,8 @@ node:
             opens: BTreeSet::new(),
             controls: Vec::new(),
             steppers: Vec::new(),
+            images: Vec::new(),
+            lists: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -4058,6 +4415,8 @@ node:
             opens: BTreeSet::new(),
             controls: Vec::new(),
             steppers: Vec::new(),
+            images: Vec::new(),
+            lists: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -4175,6 +4534,8 @@ node:
             opens: BTreeSet::new(),
             controls: Vec::new(),
             steppers: Vec::new(),
+            images: Vec::new(),
+            lists: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -4191,6 +4552,8 @@ node:
             opens: BTreeSet::new(),
             controls: Vec::new(),
             steppers: Vec::new(),
+            images: Vec::new(),
+            lists: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -4211,6 +4574,8 @@ node:
             opens: BTreeSet::new(),
             controls: Vec::new(),
             steppers: Vec::new(),
+            images: Vec::new(),
+            lists: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
             snapshot_actions: Vec::new(),
@@ -4239,6 +4604,8 @@ node:
                 opens: BTreeSet::new(),
                 controls: Vec::new(),
                 steppers: Vec::new(),
+                images: Vec::new(),
+                lists: Vec::new(),
                 snapshot_id: None,
                 snapshot_url: None,
                 snapshot_actions: Vec::new(),
@@ -4255,6 +4622,8 @@ node:
                 opens: BTreeSet::new(),
                 controls: Vec::new(),
                 steppers: Vec::new(),
+                images: Vec::new(),
+                lists: Vec::new(),
                 snapshot_id: None,
                 snapshot_url: None,
                 snapshot_actions: Vec::new(),
@@ -4271,6 +4640,8 @@ node:
                 opens: BTreeSet::new(),
                 controls: Vec::new(),
                 steppers: Vec::new(),
+                images: Vec::new(),
+                lists: Vec::new(),
                 snapshot_id: None,
                 snapshot_url: None,
                 snapshot_actions: Vec::new(),
@@ -4594,12 +4965,15 @@ node:
                             title: "Pricing".to_string(),
                         },
                     ],
+                    dynamic: false,
                 }],
                 has_docs_index_candidate: false,
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
                 controls: Vec::new(),
                 steppers: Vec::new(),
+                images: Vec::new(),
+                lists: Vec::new(),
                 snapshot_id: None,
                 snapshot_url: None,
                 snapshot_actions: Vec::new(),
@@ -4616,6 +4990,8 @@ node:
                 opens: BTreeSet::from(["WelcomeDialog".to_string()]),
                 controls: Vec::new(),
                 steppers: Vec::new(),
+                images: Vec::new(),
+                lists: Vec::new(),
                 snapshot_id: None,
                 snapshot_url: None,
                 snapshot_actions: Vec::new(),
@@ -4968,6 +5344,167 @@ node:
         assert!(summary.contains("label: PIR設定を変更"));
         assert!(summary.contains("label: PIR種類"));
         assert!(summary.contains("title: PIR設定ウィザード"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compare_scan_inputs_normalizes_builtin_dynamic_text() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-compare-normalize-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left_html = dir.join("left.html");
+        let right_html = dir.join("right.html");
+        let left_manifest = dir.join("left.snapshot.yaml");
+        let right_manifest = dir.join("right.snapshot.yaml");
+        fs::write(
+            &left_html,
+            r#"<!doctype html><html><head><title>PIR</title></head><body><button>2026/04/03 12:00 更新</button></body></html>"#,
+        )
+        .expect("write left html");
+        fs::write(
+            &right_html,
+            r#"<!doctype html><html><head><title>PIR</title></head><body><button>2026/04/04 09:30 更新</button></body></html>"#,
+        )
+        .expect("write right html");
+        fs::write(
+            &left_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: left.html
+"#,
+        )
+        .expect("write left manifest");
+        fs::write(
+            &right_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: right.html
+"#,
+        )
+        .expect("write right manifest");
+
+        let report = compare_scan_inputs(&left_manifest, &right_manifest).expect("compare");
+        let rendered = render_compare_report(&report);
+        assert!(!rendered.contains("missing-control"));
+        assert!(!rendered.contains("unexpected-control"));
+        assert!(!rendered.contains("signal-mismatch"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compare_scan_inputs_marks_dynamic_list_length_mismatch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-compare-dynamic-list-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left_html = dir.join("left.html");
+        let right_html = dir.join("right.html");
+        let left_manifest = dir.join("left.snapshot.yaml");
+        let right_manifest = dir.join("right.snapshot.yaml");
+        fs::write(
+            &left_html,
+            r#"<!doctype html><html><head><title>Feed</title></head><body>
+            <ul class='feed-list' aria-label='Recent items'><li>A</li><li>B</li></ul>
+            </body></html>"#,
+        )
+        .expect("write left html");
+        fs::write(
+            &right_html,
+            r#"<!doctype html><html><head><title>Feed</title></head><body>
+            <ul class='feed-list' aria-label='Recent items'><li>A</li><li>B</li><li>C</li></ul>
+            </body></html>"#,
+        )
+        .expect("write right html");
+        fs::write(
+            &left_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: left.html
+"#,
+        )
+        .expect("write left manifest");
+        fs::write(
+            &right_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: right.html
+"#,
+        )
+        .expect("write right manifest");
+
+        let mut config = ScanConfig::default();
+        config.compare.dynamic_selectors = vec![".feed-list".to_string()];
+        let report = compare_scan_inputs_with_config(&left_manifest, &right_manifest, &config)
+            .expect("compare");
+        let rendered = render_compare_report(&report);
+        assert!(rendered.contains("[dynamic-list-length-mismatch]"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compare_scan_inputs_marks_dynamic_image_mismatch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-compare-dynamic-image-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left_html = dir.join("left.html");
+        let right_html = dir.join("right.html");
+        let left_manifest = dir.join("left.snapshot.yaml");
+        let right_manifest = dir.join("right.snapshot.yaml");
+        fs::write(
+            &left_html,
+            r#"<!doctype html><html><head><title>Profile</title></head><body>
+            <img class='avatar' src='/avatars/alice.png' alt='Alice'>
+            </body></html>"#,
+        )
+        .expect("write left html");
+        fs::write(
+            &right_html,
+            r#"<!doctype html><html><head><title>Profile</title></head><body>
+            <img class='avatar' src='/avatars/bob.png' alt='Bob'>
+            </body></html>"#,
+        )
+        .expect("write right html");
+        fs::write(
+            &left_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: left.html
+"#,
+        )
+        .expect("write left manifest");
+        fs::write(
+            &right_manifest,
+            r#"snapshot:
+  id: same-state
+  url: /same
+  html: right.html
+"#,
+        )
+        .expect("write right manifest");
+
+        let mut config = ScanConfig::default();
+        config.compare.dynamic_selectors = vec![".avatar".to_string()];
+        let report = compare_scan_inputs_with_config(&left_manifest, &right_manifest, &config)
+            .expect("compare");
+        let rendered = render_compare_report(&report);
+        assert!(rendered.contains("[dynamic-missing-image]"));
+        assert!(rendered.contains("[dynamic-unexpected-image]"));
 
         fs::remove_dir_all(&dir).ok();
     }

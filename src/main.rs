@@ -112,7 +112,9 @@ fn main() {
         }
         "scan" => {
             let result = match config.as_ref() {
-                Some(config) => scan_html_paths_with_stage_and_config(paths.iter(), scan_stage, config),
+                Some(config) => {
+                    scan_html_paths_with_stage_and_config(paths.iter(), scan_stage, config)
+                }
                 None => scan_html_paths_with_stage(paths.iter(), scan_stage),
             };
             let result = match result {
@@ -202,7 +204,11 @@ fn print_tree_children(children: &[TreeChild], depth: usize) {
 }
 
 fn resolve_input_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
-    resolve_paths_by_extension(paths, &["gui"], "no .gui files found under current directory")
+    resolve_paths_by_extension(
+        paths,
+        &["gui"],
+        "no .gui files found under current directory",
+    )
 }
 
 fn collect_files_with_extensions(
@@ -352,7 +358,10 @@ fn resolve_paths_by_extension(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_compare_args, parse_scan_args, resolve_compare_input_paths, resolve_input_paths, resolve_scan_input_paths};
+    use super::{
+        parse_compare_args, parse_scan_args, resolve_compare_input_paths, resolve_input_paths,
+        resolve_scan_input_paths,
+    };
     use abstract_gui::ScanStage;
     use std::{
         fs,
@@ -414,22 +423,24 @@ mod tests {
         ])
         .expect("parse");
         assert_eq!(config, Some(PathBuf::from("scan.yaml")));
-        assert_eq!(paths, vec!["left.html".to_string(), "right.html".to_string()]);
+        assert_eq!(
+            paths,
+            vec!["left.html".to_string(), "right.html".to_string()]
+        );
     }
 
     #[test]
     fn resolve_compare_input_paths_requires_two_inputs() {
-        let err = resolve_compare_input_paths(vec!["one.html".to_string()]).expect_err("should fail");
+        let err =
+            resolve_compare_input_paths(vec!["one.html".to_string()]).expect_err("should fail");
         assert!(err.contains("exactly two"));
     }
 
     #[test]
     fn resolve_compare_input_paths_preserves_explicit_argument_order() {
-        let resolved = resolve_compare_input_paths(vec![
-            "right.html".to_string(),
-            "left.html".to_string(),
-        ])
-        .expect("resolve");
+        let resolved =
+            resolve_compare_input_paths(vec!["right.html".to_string(), "left.html".to_string()])
+                .expect("resolve");
         assert_eq!(
             resolved,
             vec![PathBuf::from("right.html"), PathBuf::from("left.html")]
