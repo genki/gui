@@ -7,6 +7,7 @@ This directory is the reader-friendly entry point for `abstract-gui`.
 - [Overview](./overview.md): what the language models and why it exists
 - [CLI](./cli.md): command reference and common workflows
 - [Scanning HTML](./scan.md): how `gui scan` infers abstract GUI structure
+- [Compare workflow](./cli.md#compare-workflow): how to compare HTML or snapshot manifests
 - [Roadmap](./roadmap.md): current capabilities, limits, and next likely improvements
 
 For normative details, use the files under [`spec/`](../spec/):

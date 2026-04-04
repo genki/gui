@@ -1,6 +1,8 @@
 # Scanning HTML
 
 `gui scan` reads already-rendered HTML files and emits abstract `.gui`.
+With `--stage summary`, it emits a YAML summary that is easier to compare and
+feed into downstream tooling.
 
 ## Current extraction model
 
@@ -36,6 +38,36 @@ The scanner intentionally suppresses several noisy structures:
   and `data-modal-target`
 - repeated dialog opens across related pages may be promoted to a layout node
 
+### Steppers
+
+- wizard / stepper structures can be inferred from indicator selectors, tablist-
+  like containers, and semantic class hints
+- summary output records `labels` and `active_label`
+- abstract `.gui` output can materialize the first detected stepper as nested
+  `flow-step` nodes below the scanned page state
+
+### Snapshot manifests
+
+`gui scan` accepts YAML snapshot manifests as input. Each snapshot may carry:
+
+- `id`
+- `url`
+- `html`
+- `actions`
+- `stateHints`
+
+These are preserved in summary output and can influence page hierarchy
+construction.
+
+### Dynamic regions and normalization
+
+When a config file is provided, compare-oriented scan metadata can mark regions
+as dynamic and normalize text before comparison.
+
+- `compare.dynamic_selectors`: mark matching controls, navs, lists, or images as dynamic
+- `compare.dynamic_text_patterns`: mark matching text values as dynamic
+- `compare.normalize_patterns`: regex-based text normalization before comparison
+
 ### Kinds
 
 Current inferred `node.kind` values are:
@@ -68,5 +100,6 @@ It does not yet fully solve:
 - page alias consolidation
 - dynamic JS-only modal triggers without useful attributes
 - rich docs taxonomy inference across many pages
+- semantic ownership between diff clusters and specific DOM boxes
 
 For the design rationale behind the scanner, see [`spec/scan.md`](../spec/scan.md).

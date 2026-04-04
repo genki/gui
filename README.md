@@ -112,6 +112,8 @@ gui inherit
 gui node
 gui nav
 gui scan page1.html page2.html
+gui scan --stage summary state.snapshot.yaml
+gui compare left.snapshot.yaml right.snapshot.yaml
 ```
 
 引数を省略した場合は、実行ディレクトリ配下を再帰走査して見つかったすべての
@@ -121,7 +123,8 @@ gui scan page1.html page2.html
 入力集合に追加します。
 
 - `check`, `page`, `drill`, `inherit`, `node`, `nav`: `*.gui`
-- `scan`: `*.html`, `*.htm`
+- `scan`: `*.html`, `*.htm`, `*.yaml`, `*.yml`
+- `compare`: `*.html`, `*.htm`, `*.yaml`, `*.yml`
 
 - `page`: page 条件に合致する node 一覧
 - `drill`: `drill` 木を indent 付きで表示
@@ -129,6 +132,8 @@ gui scan page1.html page2.html
 - `node`: `node` セクションのキー一覧
 - `nav`: `nav` セクションのキー一覧
 - `scan`: rendered HTML files を解析して `.gui` を stdout に出力
+  - `--stage summary` を付けると `.gui` ではなく YAML summary を出力する
+  - snapshot manifest (`*.yaml`) を入力にでき、`snapshot.id`, `snapshot.url`, `snapshot.actions`, `snapshot.stateHints` を summary / 抽象化に反映する
   - 高信頼の `nav` / `tablist` / `header` / `footer` から内部リンクを拾い、
     入力HTMLに無い page も stub として補完する
   - `login` / `cart` / `checkout` など action 寄りの導線は page stub 化を抑制する
@@ -142,6 +147,38 @@ gui scan page1.html page2.html
   - 出力 `node` には `kind: page|section|layout|action|index|dialog` を付け、抽象化後の役割を明示する
   - breadcrumb がある場合は `drill` の親推定で path prefix より優先して使う
   - 複数ページで共有される non-root nav target 群は `AccountLayout` などの部分 layout 推定に使う
+- `compare`: HTML / snapshot manifest を summary 化して差分レポートを出力
+  - `missing-dialog`, `missing-control`, `unexpected-control`, `state-hint-mismatch`, `stepper-mismatch`, `nav-mismatch`, `nav-label-mismatch` などを出力する
+  - `--config` で app 固有の selector や dynamic 領域、text normalize 規則を注入できる
+
+## Config
+
+`scan` / `compare` には YAML config を渡せます。
+
+```yaml
+stepper:
+  indicator_selectors:
+    - "[data-testid^='step-indicator-']"
+  active_class_contains:
+    - "bg-primary"
+    - "text-primary-foreground"
+
+snapshot:
+  flow_hint_keys: ["modal"]
+  step_hint_keys: ["wizard-step"]
+
+compare:
+  dynamic_selectors:
+    - ".feed-list"
+    - ".avatar"
+  dynamic_text_patterns:
+    - "^[0-9]{4}/[0-9]{2}/[0-9]{2}"
+  normalize_patterns:
+    - pattern: "TLP:[A-Z]+"
+      replacement: "TLP:<LEVEL>"
+```
+
+`compare.dynamic_selectors` は可変リストや avatar のような領域を通常差分から分離する用途を想定しています。
 
 `scan` は HTML の取得や JavaScript 実行を行いません。入力は別ツールで保存した
 rendered HTML を想定します。設計メモは `spec/scan.md` にあります。
