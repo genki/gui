@@ -5,6 +5,7 @@
 - [概要](./overview.md): 言語モデルの考え方と対象範囲
 - [CLI](./cli.md): コマンド一覧と基本ワークフロー
 - [HTML解析](./scan.md): `gui scan` が何を抽出するか
+- [比較ワークフロー](./cli.md#比較ワークフロー): HTML / snapshot manifest の差分確認
 - [ロードマップ](./roadmap.md): 現状の到達点と今後の改善余地
 
 厳密仕様は [`spec/`](../../spec/) を参照してください。
