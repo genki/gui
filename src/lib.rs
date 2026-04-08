@@ -68,6 +68,8 @@ struct ScannedPage {
     dialogs: Vec<ScannedDialog>,
     opens: BTreeSet<String>,
     controls: Vec<ScannedControl>,
+    visual_frames: Vec<ScannedVisualFrame>,
+    layout_warnings: Vec<String>,
     steppers: Vec<ScannedStepper>,
     snapshot_id: Option<String>,
     snapshot_url: Option<String>,
@@ -137,6 +139,18 @@ struct ScannedControl {
     checked: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ScannedVisualFrame {
+    kind: String,
+    label: String,
+    has_background: bool,
+    has_border: bool,
+    has_shadow: bool,
+    has_rounded: bool,
+    has_margin: bool,
+    has_padding: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanStage {
     Abstract,
@@ -178,6 +192,8 @@ struct ScanSummaryPage {
     dialogs: Vec<ScanSummaryDialog>,
     nav_candidates: Vec<ScanSummaryNavCandidate>,
     controls: Vec<ScannedControl>,
+    visual_frames: Vec<ScannedVisualFrame>,
+    layout_warnings: Vec<String>,
     steppers: Vec<ScannedStepper>,
 }
 
@@ -385,6 +401,7 @@ where
         let dialogs = extract_dialogs(&html, &title);
         let opens = extract_dialog_opens(&html, &dialogs);
         let controls = extract_controls(&html);
+        let (visual_frames, layout_warnings) = extract_visual_frames_and_warnings(&html);
         let steppers = extract_steppers(&html, config);
         scanned_pages.push(ScannedPage {
             breadcrumb_paths: extract_breadcrumb_paths(&html, location.host.as_deref()),
@@ -397,6 +414,8 @@ where
             dialogs,
             opens,
             controls,
+            visual_frames,
+            layout_warnings,
             steppers,
             snapshot_id: input.snapshot_id,
             snapshot_url: input.snapshot_url,
@@ -546,6 +565,8 @@ fn build_scan_summary(pages: &[ScannedPage]) -> ScanSummary {
                     })
                     .collect(),
                 controls: page.controls.clone(),
+                visual_frames: page.visual_frames.clone(),
+                layout_warnings: page.layout_warnings.clone(),
                 steppers: page.steppers.clone(),
             })
             .collect(),
@@ -638,6 +659,7 @@ fn compare_scan_summaries(left: &ScanSummary, right: &ScanSummary) -> CompareRep
         compare_page_hints(key, left_page, right_page, &mut findings);
         compare_page_dialogs(key, left_page, right_page, &mut findings);
         compare_page_controls(key, left_page, right_page, &mut findings);
+        compare_page_visual_frames(key, left_page, right_page, &mut findings);
         compare_page_steppers(key, left_page, right_page, &mut findings);
         compare_page_nav(key, left_page, right_page, &mut findings);
     }
@@ -748,6 +770,52 @@ fn compare_page_controls(
     }
 }
 
+
+fn compare_page_visual_frames(
+    key: &str,
+    left: &ScanSummaryPage,
+    right: &ScanSummaryPage,
+    findings: &mut Vec<CompareFinding>,
+) {
+    let left_frames = left
+        .visual_frames
+        .iter()
+        .map(|frame| (visual_frame_key(frame), frame))
+        .collect::<BTreeMap<_, _>>();
+    let right_frames = right
+        .visual_frames
+        .iter()
+        .map(|frame| (visual_frame_key(frame), frame))
+        .collect::<BTreeMap<_, _>>();
+    for frame_key_name in left_frames.keys() {
+        if !right_frames.contains_key(frame_key_name) {
+            findings.push(CompareFinding {
+                kind: "missing-visual-frame".to_string(),
+                message: format!("state `{key}` で right に visual frame `{frame_key_name}` が無い"),
+            });
+        }
+    }
+    for frame_key_name in right_frames.keys() {
+        if !left_frames.contains_key(frame_key_name) {
+            findings.push(CompareFinding {
+                kind: "unexpected-visual-frame".to_string(),
+                message: format!("state `{key}` で right にのみ visual frame `{frame_key_name}` がある"),
+            });
+        }
+    }
+    for (frame_key_name, left_frame) in &left_frames {
+        let Some(right_frame) = right_frames.get(frame_key_name) else {
+            continue;
+        };
+        for mismatch in compare_visual_frame_signals(left_frame, right_frame) {
+            findings.push(CompareFinding {
+                kind: "visual-frame-signal-mismatch".to_string(),
+                message: format!("state `{key}` の visual frame `{frame_key_name}` で {mismatch}"),
+            });
+        }
+    }
+}
+
 fn compare_page_steppers(
     key: &str,
     left: &ScanSummaryPage,
@@ -814,6 +882,10 @@ fn control_key(control: &ScannedControl) -> String {
     format!("{}:{}", control.kind, control.label)
 }
 
+fn visual_frame_key(frame: &ScannedVisualFrame) -> String {
+    frame.label.clone()
+}
+
 fn compare_control_signals(left: &ScannedControl, right: &ScannedControl) -> Vec<String> {
     let mut out = Vec::new();
     if left.active != right.active {
@@ -830,6 +902,35 @@ fn compare_control_signals(left: &ScannedControl, right: &ScannedControl) -> Vec
     }
     if left.checked != right.checked {
         out.push(format!("checked mismatch left={} right={}", left.checked, right.checked));
+    }
+    out
+}
+
+fn compare_visual_frame_signals(
+    left: &ScannedVisualFrame,
+    right: &ScannedVisualFrame,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if left.has_background != right.has_background {
+        out.push(format!(
+            "background mismatch left={} right={}",
+            left.has_background, right.has_background
+        ));
+    }
+    if left.has_border != right.has_border {
+        out.push(format!("border mismatch left={} right={}", left.has_border, right.has_border));
+    }
+    if left.has_shadow != right.has_shadow {
+        out.push(format!("shadow mismatch left={} right={}", left.has_shadow, right.has_shadow));
+    }
+    if left.has_rounded != right.has_rounded {
+        out.push(format!("rounded mismatch left={} right={}", left.has_rounded, right.has_rounded));
+    }
+    if left.has_margin != right.has_margin {
+        out.push(format!("margin mismatch left={} right={}", left.has_margin, right.has_margin));
+    }
+    if left.has_padding != right.has_padding {
+        out.push(format!("padding mismatch left={} right={}", left.has_padding, right.has_padding));
     }
     out
 }
@@ -908,6 +1009,12 @@ fn merge_scanned_page(into: &mut ScannedPage, from: ScannedPage) {
 
     if into.controls.is_empty() {
         into.controls = from.controls.clone();
+    }
+    if into.visual_frames.is_empty() {
+        into.visual_frames = from.visual_frames.clone();
+    }
+    if into.layout_warnings.is_empty() {
+        into.layout_warnings = from.layout_warnings.clone();
     }
     if into.steppers.is_empty() {
         into.steppers = from.steppers.clone();
@@ -1020,6 +1127,8 @@ fn document_from_scanned_pages(pages: &[ScannedPage], config: &ScanConfig) -> Do
                         dialogs: Vec::new(),
                         opens: BTreeSet::new(),
                         controls: Vec::new(),
+                        visual_frames: Vec::new(),
+                        layout_warnings: Vec::new(),
                         steppers: Vec::new(),
                         snapshot_id: None,
                         snapshot_url: None,
@@ -1442,6 +1551,292 @@ fn looks_like_stepper_label(label: &str, config: &StepperScanConfig) -> bool {
         .chars()
         .all(|ch| ch.is_ascii_punctuation() || ch.is_whitespace());
     has_alpha_numeric && !punctuation_like
+}
+
+
+#[derive(Debug, Clone, Copy)]
+struct VisualSignalFlags {
+    has_background: bool,
+    has_border: bool,
+    has_shadow: bool,
+    has_rounded: bool,
+    has_margin: bool,
+    has_padding: bool,
+}
+
+fn extract_visual_frames_and_warnings(html: &Html) -> (Vec<ScannedVisualFrame>, Vec<String>) {
+    let selector = Selector::parse("main, section, article, aside, nav, form, dialog, div")
+        .expect("visual frame selector");
+    let heading_selector = Selector::parse("h1, h2, h3, h4, [role='heading']")
+        .expect("visual frame heading selector");
+    let mut frames = Vec::new();
+    let mut frame_seen = BTreeSet::new();
+    let mut warnings = BTreeSet::new();
+
+    for element in html.select(&selector) {
+        let Some(frame) = derive_visual_frame(&element, &heading_selector) else {
+            continue;
+        };
+        let fingerprint = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            frame.kind,
+            frame.label,
+            frame.has_background,
+            frame.has_border,
+            frame.has_shadow,
+            frame.has_rounded,
+            frame.has_margin,
+            frame.has_padding,
+        );
+        if frame_seen.insert(fingerprint) {
+            frames.push(frame.clone());
+        }
+
+        let mut parent_cursor = element.parent().and_then(scraper::ElementRef::wrap);
+        let mut parent_frame = None;
+        while let Some(parent_element) = parent_cursor {
+            if let Some(frame_parent) = derive_visual_frame(&parent_element, &heading_selector) {
+                parent_frame = Some(frame_parent);
+                break;
+            }
+            parent_cursor = parent_element.parent().and_then(scraper::ElementRef::wrap);
+        }
+        let Some(parent) = parent_frame else {
+            continue;
+        };
+
+        if parent.has_padding && frame.has_margin {
+            warnings.insert(format!(
+                "visual frame `{}` の内側で child `{}` が margin を持ち、親子間で padding と margin が重複している",
+                parent.label, frame.label
+            ));
+        }
+        if parent.has_margin && frame.has_padding {
+            warnings.insert(format!(
+                "visual frame `{}` と child `{}` の間で margin と padding が混在している",
+                parent.label, frame.label
+            ));
+        }
+        if parent.has_margin && frame.has_margin {
+            warnings.insert(format!(
+                "visual frame `{}` の内側で child `{}` も margin を持ち、margin が重複している",
+                parent.label, frame.label
+            ));
+        }
+        if parent.has_padding && frame.has_padding {
+            warnings.insert(format!(
+                "visual frame `{}` の内側で child `{}` も padding を持ち、padding が重複している",
+                parent.label, frame.label
+            ));
+        }
+    }
+
+    (frames, warnings.into_iter().collect())
+}
+
+fn derive_visual_frame(
+    element: &scraper::ElementRef<'_>,
+    heading_selector: &Selector,
+) -> Option<ScannedVisualFrame> {
+    let signals = derive_visual_signal_flags(element);
+    let keyword_blob = visual_keyword_blob(element);
+    let role = element.value().attr("role").unwrap_or_default().to_ascii_lowercase();
+    let keyword_match = [
+        "card", "panel", "modal", "dialog", "frame", "surface", "widget", "tile",
+        "section", "container", "box",
+    ]
+    .iter()
+    .any(|needle| keyword_blob.contains(needle));
+    let role_match = matches!(role.as_str(), "dialog" | "region" | "complementary")
+        || element.value().name().eq_ignore_ascii_case("dialog");
+
+    if !(signals.has_background
+        || signals.has_border
+        || signals.has_shadow
+        || signals.has_rounded
+        || keyword_match
+        || role_match)
+    {
+        return None;
+    }
+
+    let mut label = ["aria-label", "title", "data-testid", "id"]
+        .iter()
+        .find_map(|attr| element.value().attr(attr))
+        .map(|value| collapse_text(value.to_string()))
+        .unwrap_or_default();
+    if label.is_empty() {
+        if let Some(heading) = element.select(heading_selector).next() {
+            label = collapse_text(heading.text().collect::<String>());
+        }
+    }
+    if label.is_empty() {
+        label = collapse_text(element.text().take(60).collect::<String>());
+    }
+    if label.is_empty() {
+        label = element.value().name().to_string();
+    }
+
+    let kind = if signals.has_background && signals.has_border {
+        "outlined-surface"
+    } else if signals.has_background {
+        "surface"
+    } else if signals.has_border {
+        "outline"
+    } else if signals.has_shadow {
+        "elevated"
+    } else {
+        "container"
+    }
+    .to_string();
+
+    Some(ScannedVisualFrame {
+        kind,
+        label,
+        has_background: signals.has_background,
+        has_border: signals.has_border,
+        has_shadow: signals.has_shadow,
+        has_rounded: signals.has_rounded,
+        has_margin: signals.has_margin,
+        has_padding: signals.has_padding,
+    })
+}
+
+fn derive_visual_signal_flags(element: &scraper::ElementRef<'_>) -> VisualSignalFlags {
+    let style = element.value().attr("style").unwrap_or_default().to_ascii_lowercase();
+    let class_name = element.value().attr("class").unwrap_or_default().to_ascii_lowercase();
+    let keyword_blob = visual_keyword_blob(element);
+    let computed_background = element
+        .value()
+        .attr("data-gui-computed-background-color")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let computed_box_shadow = element
+        .value()
+        .attr("data-gui-computed-box-shadow")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let computed_border_radius = element
+        .value()
+        .attr("data-gui-computed-border-radius")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let has_background = style.contains("background")
+        || class_name.contains("bg-")
+        || class_name.contains("background")
+        || keyword_blob.contains("surface")
+        || has_non_transparent_color(&computed_background);
+    let has_border = (style.contains("border")
+        && !style.contains("border: none")
+        && !style.contains("border:none"))
+        || class_name.contains("border")
+        || class_name.contains("ring")
+        || keyword_blob.contains("outlined")
+        || has_any_non_zero_computed_border(element);
+    let has_shadow = style.contains("box-shadow")
+        || class_name.contains("shadow")
+        || has_non_none_value(&computed_box_shadow);
+    let has_rounded = style.contains("border-radius")
+        || class_name.contains("rounded")
+        || class_name.contains("radius")
+        || has_non_zero_length(&computed_border_radius);
+    let has_margin = style.contains("margin")
+        || class_name.contains("m-")
+        || class_name.contains("mx-")
+        || class_name.contains("my-")
+        || class_name.contains("mt-")
+        || class_name.contains("mr-")
+        || class_name.contains("mb-")
+        || class_name.contains("ml-")
+        || has_any_non_zero_computed_spacing(element, "margin");
+    let has_padding = style.contains("padding")
+        || class_name.contains("p-")
+        || class_name.contains("px-")
+        || class_name.contains("py-")
+        || class_name.contains("pt-")
+        || class_name.contains("pr-")
+        || class_name.contains("pb-")
+        || class_name.contains("pl-")
+        || has_any_non_zero_computed_spacing(element, "padding");
+    VisualSignalFlags {
+        has_background,
+        has_border,
+        has_shadow,
+        has_rounded,
+        has_margin,
+        has_padding,
+    }
+}
+
+fn visual_keyword_blob(element: &scraper::ElementRef<'_>) -> String {
+    let class_name = element.value().attr("class").unwrap_or_default().to_ascii_lowercase();
+    let id = element.value().attr("id").unwrap_or_default().to_ascii_lowercase();
+    let data_testid = element
+        .value()
+        .attr("data-testid")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let role = element.value().attr("role").unwrap_or_default().to_ascii_lowercase();
+    format!("{} {} {} {} {}", element.value().name(), role, class_name, id, data_testid)
+}
+
+fn has_any_non_zero_computed_border(element: &scraper::ElementRef<'_>) -> bool {
+    [
+        "data-gui-computed-border-top-width",
+        "data-gui-computed-border-right-width",
+        "data-gui-computed-border-bottom-width",
+        "data-gui-computed-border-left-width",
+    ]
+    .iter()
+    .filter_map(|attr| element.value().attr(attr))
+    .any(has_non_zero_length)
+}
+
+fn has_any_non_zero_computed_spacing(element: &scraper::ElementRef<'_>, kind: &str) -> bool {
+    ["top", "right", "bottom", "left"]
+        .iter()
+        .map(|edge| format!("data-gui-computed-{kind}-{edge}"))
+        .filter_map(|attr| element.value().attr(&attr))
+        .any(has_non_zero_length)
+}
+
+fn has_non_transparent_color(value: &str) -> bool {
+    let trimmed = value.trim().to_ascii_lowercase();
+    !(trimmed.is_empty()
+        || trimmed == "transparent"
+        || trimmed == "rgba(0, 0, 0, 0)"
+        || trimmed == "rgba(0,0,0,0)")
+}
+
+fn has_non_none_value(value: &str) -> bool {
+    let trimmed = value.trim().to_ascii_lowercase();
+    !(trimmed.is_empty() || trimmed == "none")
+}
+
+fn has_non_zero_length(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let mut current = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() || ch == '.' || ch == '-' {
+            current.push(ch);
+            continue;
+        }
+        if !current.is_empty() {
+            if let Ok(number) = current.parse::<f32>() {
+                if number.abs() > 0.001 {
+                    return true;
+                }
+            }
+            current.clear();
+        }
+    }
+    if let Ok(number) = current.parse::<f32>() {
+        return number.abs() > 0.001;
+    }
+    false
 }
 
 fn extract_controls(html: &Html) -> Vec<ScannedControl> {
@@ -3509,8 +3904,8 @@ mod tests {
     use super::{
         build_drill_section, infer_layout_groups, infer_page_path, load_document_from_path,
         load_documents_from_paths, normalize_logical_page_path, normalize_scanned_pages,
-        compare_scan_inputs_with_config, parse_document, prune_redundant_nav_clusters, render_compare_report,
-        render_document, render_scan_summary, scan_html_paths, scan_html_paths_with_stage,
+        compare_scan_inputs, compare_scan_inputs_with_config, parse_document, prune_redundant_nav_clusters,
+        render_compare_report, render_document, render_scan_summary, scan_html_paths, scan_html_paths_with_stage,
         validate_document, AttrValue, NavCandidate, NavCluster, ScanConfig, ScanStage, ScannedPage,
         ScannedTarget, TreeChild,
     };
@@ -3744,8 +4139,10 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
+            controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
+            steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3760,8 +4157,10 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
+            controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
+            steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3776,8 +4175,10 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
+            controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
+            steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3792,8 +4193,10 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
+            controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
+            steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3909,8 +4312,10 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
+            controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
+            steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3925,8 +4330,10 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
+            controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
+            steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3945,8 +4352,10 @@ node:
             has_docs_index_candidate: false,
             dialogs: Vec::new(),
             opens: BTreeSet::new(),
-        controls: Vec::new(),
-        steppers: Vec::new(),
+            controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
+            steppers: Vec::new(),
         snapshot_id: None,
         snapshot_url: None,
         snapshot_actions: Vec::new(),
@@ -3974,6 +4383,8 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
             steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
@@ -3990,6 +4401,8 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
             steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
@@ -4006,6 +4419,8 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
             steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
@@ -4335,6 +4750,8 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::new(),
             controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
             steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
@@ -4351,6 +4768,8 @@ node:
                 dialogs: Vec::new(),
                 opens: BTreeSet::from(["WelcomeDialog".to_string()]),
             controls: Vec::new(),
+            visual_frames: Vec::new(),
+            layout_warnings: Vec::new(),
             steppers: Vec::new(),
             snapshot_id: None,
             snapshot_url: None,
@@ -4530,6 +4949,75 @@ node:
         assert!(summary.contains("label: PIR設定を変更"));
         assert!(summary.contains("label: PIR種類"));
         assert!(summary.contains("title: PIR設定ウィザード"));
+        assert!(!summary.contains("visual_frames: []"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+
+    #[test]
+    fn scan_and_compare_visual_frames_detect_surface_gap() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-visual-frame-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let left = dir.join("left.html");
+        let right = dir.join("right.html");
+        fs::write(
+            &left,
+            r#"<!doctype html><html><head><title>Help</title><link rel="canonical" href="https://example.test/help" /></head><body>
+                <section aria-label="overview" style="background-color:#111827;border:1px solid #334155;border-radius:12px">概要</section>
+            </body></html>"#,
+        )
+        .expect("write left");
+        fs::write(
+            &right,
+            r#"<!doctype html><html><head><title>Help</title><link rel="canonical" href="https://example.test/help" /></head><body>
+                <section aria-label="overview">概要</section>
+            </body></html>"#,
+        )
+        .expect("write right");
+
+        let left_result = scan_html_paths_with_stage([&left], ScanStage::Summary).expect("scan left");
+        let summary = render_scan_summary(&left_result.summary);
+        assert!(summary.contains("visual_frames:"));
+        assert!(summary.contains("label: overview"));
+
+        let report = compare_scan_inputs(&left, &right).expect("compare");
+        let rendered = render_compare_report(&report);
+        assert!(rendered.contains("missing-visual-frame") || rendered.contains("visual-frame-signal-mismatch"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+
+    #[test]
+    fn scan_summary_reports_nested_spacing_warnings_and_computed_style() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-spacing-warning-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let html = dir.join("warning.html");
+        fs::write(
+            &html,
+            r#"<!doctype html><html><head><title>Help</title><link rel="canonical" href="https://example.test/help" /></head><body>
+                <section aria-label="parent" data-gui-computed-padding-top="24px" data-gui-computed-padding-right="24px" data-gui-computed-padding-bottom="24px" data-gui-computed-padding-left="24px" data-gui-computed-background-color="rgb(17, 24, 39)">
+                    <div aria-label="child" data-gui-computed-margin-top="16px" data-gui-computed-margin-right="16px" data-gui-computed-margin-bottom="16px" data-gui-computed-margin-left="16px" data-gui-computed-border-top-width="1px">内容</div>
+                </section>
+            </body></html>"#,
+        )
+        .expect("write html");
+
+        let result = scan_html_paths_with_stage([&html], ScanStage::Summary).expect("scan");
+        let summary = render_scan_summary(&result.summary);
+        assert!(summary.contains("layout_warnings:"));
+        assert!(summary.contains("padding と margin が重複"));
+        assert!(summary.contains("label: parent"));
+        assert!(summary.contains("label: child"));
 
         fs::remove_dir_all(&dir).ok();
     }
