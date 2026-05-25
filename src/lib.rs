@@ -126,6 +126,9 @@ struct ScannedDialog {
 struct ScannedStepper {
     labels: Vec<String>,
     active_label: Option<String>,
+    active_index: Option<usize>,
+    total: usize,
+    progress: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1281,15 +1284,18 @@ fn document_from_scanned_pages(pages: &[ScannedPage], config: &ScanConfig) -> Do
     }
 
     for page in &scanned_pages {
-        for (step_id, step_label, is_active) in page_stepper_nodes(page) {
+        for step in page_stepper_nodes(page) {
             let mut attrs = BTreeMap::new();
             attrs.insert("kind".to_string(), AttrValue::Scalar("flow-step".to_string()));
-            attrs.insert("title".to_string(), AttrValue::Scalar(step_label));
+            attrs.insert("title".to_string(), AttrValue::Scalar(step.label));
             attrs.insert(
                 "active".to_string(),
-                AttrValue::Scalar(if is_active { "true" } else { "false" }.to_string()),
+                AttrValue::Scalar(if step.active { "true" } else { "false" }.to_string()),
             );
-            node.insert(step_id, NodeSpec { attrs });
+            attrs.insert("step-index".to_string(), AttrValue::Scalar(step.index.to_string()));
+            attrs.insert("step-count".to_string(), AttrValue::Scalar(step.total.to_string()));
+            attrs.insert("step-position".to_string(), AttrValue::Scalar(step.position));
+            node.insert(step.id, NodeSpec { attrs });
         }
         for dialog in &page.dialogs {
             let mut attrs = BTreeMap::new();
@@ -1527,11 +1533,35 @@ fn push_stepper_candidate(
     if labels.len() < 2 {
         return;
     }
+    if let Some(existing) = steppers.iter_mut().find(|stepper| stepper.labels == labels) {
+        if existing.active_label.is_none() && active_label.is_some() {
+            update_stepper_active(existing, active_label);
+        }
+        return;
+    }
     let fingerprint = format!("{}|{}", labels.join("|"), active_label.clone().unwrap_or_default());
     if !seen.insert(fingerprint) {
         return;
     }
-    steppers.push(ScannedStepper { labels, active_label });
+    let total = labels.len();
+    let mut stepper = ScannedStepper {
+        labels,
+        active_label: None,
+        active_index: None,
+        total,
+        progress: None,
+    };
+    update_stepper_active(&mut stepper, active_label);
+    steppers.push(stepper);
+}
+
+fn update_stepper_active(stepper: &mut ScannedStepper, active_label: Option<String>) {
+    stepper.active_index = active_label
+        .as_ref()
+        .and_then(|active| stepper.labels.iter().position(|label| label == active))
+        .map(|index| index + 1);
+    stepper.progress = stepper.active_index.map(|index| format!("{index}/{}", stepper.total));
+    stepper.active_label = active_label;
 }
 
 fn looks_like_stepper_label(label: &str, config: &StepperScanConfig) -> bool {
@@ -3096,31 +3126,46 @@ fn snapshot_step_name(page: &ScannedPage, config: &SnapshotScanConfig) -> String
         .unwrap_or_default()
 }
 
-fn page_stepper_nodes(page: &ScannedPage) -> Vec<(String, String, bool)> {
+#[derive(Debug, Clone)]
+struct StepperNode {
+    id: String,
+    label: String,
+    active: bool,
+    index: usize,
+    total: usize,
+    position: String,
+}
+
+fn page_stepper_nodes(page: &ScannedPage) -> Vec<StepperNode> {
     let Some(stepper) = page.steppers.first() else {
         return Vec::new();
     };
+    let total = stepper.labels.len();
     stepper
         .labels
         .iter()
         .enumerate()
         .map(|(index, label)| {
-            (
-                format!("{}Step{}", page.page_id, index + 1),
-                label.clone(),
-                stepper.active_label.as_ref() == Some(label),
-            )
+            let position = index + 1;
+            StepperNode {
+                id: format!("{}Step{}", page.page_id, position),
+                label: label.clone(),
+                active: stepper.active_label.as_ref() == Some(label),
+                index: position,
+                total,
+                position: format!("{position}/{total}"),
+            }
         })
         .collect()
 }
 
-fn build_stepper_tree(children: &[(String, String, bool)]) -> Vec<TreeChild> {
-    if let Some((first_id, _, _)) = children.first() {
+fn build_stepper_tree(children: &[StepperNode]) -> Vec<TreeChild> {
+    if let Some(first) = children.first() {
         let nested = build_stepper_tree(&children[1..]);
         if nested.is_empty() {
-            vec![TreeChild::Leaf(first_id.clone())]
+            vec![TreeChild::Leaf(first.id.clone())]
         } else {
-            vec![TreeChild::Branch(first_id.clone(), nested)]
+            vec![TreeChild::Branch(first.id.clone(), nested)]
         }
     } else {
         Vec::new()
@@ -3906,8 +3951,8 @@ mod tests {
         load_documents_from_paths, normalize_logical_page_path, normalize_scanned_pages,
         compare_scan_inputs, compare_scan_inputs_with_config, parse_document, prune_redundant_nav_clusters,
         render_compare_report, render_document, render_scan_summary, scan_html_paths, scan_html_paths_with_stage,
-        validate_document, AttrValue, NavCandidate, NavCluster, ScanConfig, ScanStage, ScannedPage,
-        ScannedTarget, TreeChild,
+        scan_html_paths_with_stage_and_config, validate_document, AttrValue, NavCandidate, NavCluster, ScanConfig,
+        ScanStage, ScannedPage, ScannedTarget, TreeChild,
     };
 
     const DEMO: &str = include_str!("../examples/demo.gui");
@@ -4813,6 +4858,7 @@ node:
     <div class="wizard-header">
       <div><div data-testid="step-indicator-about" class="bg-primary text-primary-foreground"></div><span>PIRとは</span></div>
       <div><div data-testid="step-indicator-pirType" class="bg-muted text-muted-foreground"></div><span>PIR種類</span></div>
+      <div><div data-testid="step-indicator-review" class="bg-muted text-muted-foreground"></div><span>確認</span></div>
     </div>
     <dialog id="pir-wizard" aria-label="PIR設定ウィザード"></dialog>
   </body>
@@ -4832,6 +4878,7 @@ node:
     <div class="wizard-header">
       <div><div data-testid="step-indicator-about" class="bg-muted text-muted-foreground"></div><span>PIRとは</span></div>
       <div><div data-testid="step-indicator-pirType" class="bg-primary text-primary-foreground"></div><span>PIR種類</span></div>
+      <div><div data-testid="step-indicator-review" class="bg-muted text-muted-foreground"></div><span>確認</span></div>
     </div>
   </body>
 </html>"#,
@@ -4869,6 +4916,72 @@ node:
         assert!(rendered.contains("[missing-control]"));
         assert!(rendered.contains("[state-hint-mismatch]"));
         assert!(rendered.contains("[stepper-mismatch]"));
+        assert!(rendered.contains("PIRとは > PIR種類 > 確認 => PIRとは"));
+        assert!(rendered.contains("PIRとは > PIR種類 > 確認 => PIR種類"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scan_manifest_records_stepper_progress_for_dimmed_future_steps() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gui-stepper-progress-test-{unique}"));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let html = dir.join("pir.html");
+        let manifest = dir.join("pir.snapshot.yaml");
+        fs::write(
+            &html,
+            r#"<!doctype html>
+<html>
+  <head><title>PIR</title></head>
+  <body>
+    <div class="wizard-header">
+      <div><div data-testid="step-indicator-about" class="bg-muted text-muted-foreground"></div><span>PIRとは</span></div>
+      <div><div data-testid="step-indicator-pirType" class="bg-primary text-primary-foreground"></div><span>PIR種類</span></div>
+      <div><div data-testid="step-indicator-review" class="bg-muted text-muted-foreground"></div><span>確認</span></div>
+    </div>
+  </body>
+</html>"#,
+        )
+        .expect("write html");
+        fs::write(
+            &manifest,
+            r#"snapshot:
+  id: pir-wizard-type
+  url: /client-admin/pir-management
+  html: pir.html
+"#,
+        )
+        .expect("write manifest");
+
+        let mut config = ScanConfig::default();
+        config.stepper.indicator_selectors = vec!["[data-testid^='step-indicator-']".to_string()];
+        config.stepper.active_class_contains = vec!["bg-primary".to_string(), "text-primary-foreground".to_string()];
+        let result = scan_html_paths_with_stage_and_config([&manifest], ScanStage::Summary, &config).expect("scan");
+        assert_eq!(result.summary.pages.len(), 1);
+        assert_eq!(result.summary.pages[0].steppers.len(), 1);
+        let stepper = &result.summary.pages[0].steppers[0];
+        assert_eq!(stepper.labels, vec!["PIRとは", "PIR種類", "確認"]);
+        assert_eq!(stepper.active_label.as_deref(), Some("PIR種類"));
+        assert_eq!(stepper.active_index, Some(2));
+        assert_eq!(stepper.total, 3);
+        assert_eq!(stepper.progress.as_deref(), Some("2/3"));
+
+        let active_step = result
+            .document
+            .node
+            .values()
+            .find(|spec| {
+                matches!(spec.attrs.get("title"), Some(AttrValue::Scalar(value)) if value == "PIR種類")
+            })
+            .expect("active step");
+        match active_step.attrs.get("step-position") {
+            Some(AttrValue::Scalar(value)) => assert_eq!(value, "2/3"),
+            other => panic!("unexpected step-position: {other:?}"),
+        }
 
         fs::remove_dir_all(&dir).ok();
     }
